@@ -17,7 +17,12 @@ def main() -> int:
     app.setApplicationName("THGEM Exercise 3.B School GUI")
     app.setOrganizationName("Detector School")
 
-    window = MainWindow(Path(__file__).resolve().parent)
+    if getattr(sys, "frozen", False):  # PyInstaller one-folder bundle
+        base_dir = Path(sys.executable).resolve().parent
+    else:
+        base_dir = Path(__file__).resolve().parent
+
+    window = MainWindow(base_dir)
     window.show()
     return app.exec_()
 

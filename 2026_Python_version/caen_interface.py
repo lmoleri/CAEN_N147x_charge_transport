@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import os
 import random
+import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, fields
 from pathlib import Path
@@ -490,6 +491,8 @@ class CAENWrapperInterface(BaseCaenInterface):
         candidate_paths: list[str] = []
         if self.dll_path is not None:
             candidate_paths.append(str(self.dll_path))
+        if getattr(sys, "frozen", False):  # bundled exe: DLL dropped beside it
+            candidate_paths.append(str(Path(sys.executable).resolve().with_name("CAENHVWrapper.dll")))
         candidate_paths.append(str(Path(__file__).resolve().with_name("CAENHVWrapper.dll")))
         candidate_paths.append("CAENHVWrapper.dll")
 
