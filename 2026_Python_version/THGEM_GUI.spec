@@ -20,7 +20,18 @@ a = Analysis(
     pathex=['.'],
     binaries=caen_binaries,
     datas=caen_datas,
-    hiddenimports=['PyQt5.QtWebEngineWidgets', 'caen_libs.caenhvwrapper'] + caen_hidden,
+    hiddenimports=[
+        # QtWebEngineWidgets pulls in these at the C-extension level; PyInstaller's
+        # hook does not always collect them, so list them explicitly.
+        'PyQt5.QtWebEngineWidgets',
+        'PyQt5.QtWebEngineCore',
+        'PyQt5.QtWebChannel',
+        'PyQt5.QtPrintSupport',
+        'PyQt5.QtNetwork',
+        'PyQt5.QtQuick',
+        'PyQt5.QtQml',
+        'caen_libs.caenhvwrapper',
+    ] + caen_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -87,11 +87,16 @@ class _PlotServer:
                     body, ctype = plotly_js, "application/javascript"
                 else:
                     body, ctype = page, "text/html; charset=utf-8"
-                self.send_response(200)
-                self.send_header("Content-Type", ctype)
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", ctype)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    # QtWebEngine cancels in-flight requests when a view is hidden
+                    # or torn down — not an error worth crashing the thread over.
+                    pass
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         threading.Thread(target=self._server.serve_forever, daemon=True).start()

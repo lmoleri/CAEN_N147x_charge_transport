@@ -7,3 +7,9 @@ __pycache__/
 
 # Qt / pyqtgraph cache
 .qt/
+
+# PyInstaller / build artifacts
+build/
+dist/
+.venv/
+*.log

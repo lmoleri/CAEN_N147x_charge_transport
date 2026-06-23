@@ -4,6 +4,68 @@ import sys
 from pathlib import Path
 
 
+def _selftest(app) -> int:
+    """Headless render check used to validate a (frozen) bundle: load the Plotly
+    view, push a few points, and confirm Plotly created the traces inside the
+    embedded QtWebEngine. Prints SELFTEST OK/FAIL and returns an exit code.
+    Run with:  THGEM_GUI --selftest  (set QT_QPA_PLATFORM=offscreen for headless).
+    """
+    import time
+
+    from PyQt5 import QtCore
+
+    from caen_interface import CHANNEL_LABELS
+    from plotly_view import PlotlyScanView
+    from scan_controller import ScanController
+
+    controller = ScanController()
+    field_configs = list(controller.field_configs_for_mode(controller.mode_names()[0]))[:1]
+    view = PlotlyScanView()
+    view.resize(420, 300)
+    view.show()
+    view.reset_tabs(field_configs)
+    page = view._pages[field_configs[0].label]
+
+    deadline = time.time() + 40
+    while time.time() < deadline and not page._ready:
+        app.processEvents()
+        time.sleep(0.02)
+
+    class _Snap:
+        def __init__(self, na: float) -> None:
+            self.imon_na = na
+
+    class _Rec:
+        def __init__(self, label: str) -> None:
+            self.subscan_label = label
+            self.v_thgem1_v = 100.0
+
+        def channel_snapshots(self):
+            return {label: _Snap(float(i)) for i, label in enumerate(CHANNEL_LABELS)}
+
+    for _ in range(3):
+        view.append_record(_Rec(field_configs[0].label))
+    settle = time.time() + 3
+    while time.time() < settle:
+        app.processEvents()
+        time.sleep(0.02)
+
+    result: dict[str, object] = {}
+    loop = QtCore.QEventLoop()
+    page.page().runJavaScript(
+        "(document.getElementById('graph')||{}).data ? "
+        "document.getElementById('graph').data.map(t=>t.x.length) : null",
+        lambda r: (result.__setitem__("r", r), loop.quit()),
+    )
+    QtCore.QTimer.singleShot(8000, loop.quit)
+    loop.exec_()
+
+    lens = result.get("r")
+    ok = isinstance(lens, list) and len(lens) == 4 and all(v == 3 for v in lens)
+    print(f"SELFTEST {'OK' if ok else 'FAIL'} (page_ready={page._ready}, trace_lengths={lens})")
+    return 0 if ok else 1
+
+
 def main() -> int:
     try:
         from PyQt5 import QtCore, QtWidgets
@@ -19,6 +81,9 @@ def main() -> int:
     app.setApplicationName("THGEM Exercise 3.B School GUI")
     app.setOrganizationName("Detector School")
     app.setStyle("Fusion")
+
+    if "--selftest" in sys.argv:
+        return _selftest(app)
 
     from main_window import MainWindow
 
