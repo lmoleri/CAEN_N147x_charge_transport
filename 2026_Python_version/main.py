@@ -82,6 +82,14 @@ def main() -> int:
     app.setOrganizationName("Detector School")
     app.setStyle("Fusion")
 
+    if "--selfcheck" in sys.argv:
+        # Lightweight frozen-bundle gate for CI: the heavy deps imported above and a
+        # QApplication exists; confirm plotly is bundled too, WITHOUT creating a
+        # QtWebEngine view (headless CI runners crash building a GL/web context).
+        import plotly  # noqa: F401
+        print("SELFCHECK OK")
+        return 0
+
     if "--selftest" in sys.argv:
         return _selftest(app)
 
