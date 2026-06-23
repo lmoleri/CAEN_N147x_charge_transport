@@ -4,15 +4,23 @@
 #     pyinstaller --noconfirm THGEM_GUI.spec
 # Output: dist/THGEM_GUI/THGEM_GUI.exe  (+ an _internal/ support folder)
 #
-# The CAEN driver (CAENHVWrapper.dll) is NOT bundled. For real hardware,
-# drop it next to THGEM_GUI.exe; the Simulation backend needs nothing.
+# The CAEN HV Wrapper DLL is NOT bundled (it ships with CAEN's own installer).
+# For real hardware, install it on the lab PC; the Simulation backend needs
+# nothing. QtWebEngine (for the Plotly plots) is pulled in by PyInstaller's PyQt5
+# hooks via the QtWebEngineWidgets hidden import below.
+
+from PyInstaller.utils.hooks import collect_all
+
+# Bundle the caen_libs package (Python files; the native CAEN DLL is not in the
+# wheel and remains a runtime prerequisite on the hardware PC).
+caen_datas, caen_binaries, caen_hidden = collect_all("caen_libs")
 
 a = Analysis(
     ['main.py'],
     pathex=['.'],
-    binaries=[],
-    datas=[],
-    hiddenimports=['pyqtgraph'],
+    binaries=caen_binaries,
+    datas=caen_datas,
+    hiddenimports=['PyQt5.QtWebEngineWidgets', 'caen_libs.caenhvwrapper'] + caen_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

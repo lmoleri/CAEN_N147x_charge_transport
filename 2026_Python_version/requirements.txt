@@ -1,3 +1,6 @@
 PyQt5>=5.15,<6
+PyQtWebEngine>=5.15,<6
 pyqtgraph>=0.14,<0.15
 pyserial>=3.5,<4
+plotly>=6,<7
+caen-libs>=3,<4

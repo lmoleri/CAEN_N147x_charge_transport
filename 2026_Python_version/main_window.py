@@ -16,7 +16,7 @@ from caen_interface import (
     list_serial_ports,
 )
 from data_logger import DataLogger
-from plotting import ScanPlotTabs
+from plotly_view import PlotlyScanView
 from scan_controller import ScanCallbacks, ScanController
 
 
@@ -316,7 +316,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_plot_group(self) -> QtWidgets.QGroupBox:
         group = QtWidgets.QGroupBox("Current vs THGEM1 Voltage")
         layout = QtWidgets.QVBoxLayout(group)
-        self.plot_tabs = ScanPlotTabs()
+        self.plot_tabs = PlotlyScanView()
         layout.addWidget(self.plot_tabs)
         return group
 
