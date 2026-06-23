@@ -43,6 +43,7 @@ jobs:
         continue-on-error: true   # first run: report render result without blocking the artifact
         env:
           QT_QPA_PLATFORM: offscreen
+          QT_OPENGL: software            # use bundled opengl32sw.dll (no GPU on the runner)
           QTWEBENGINE_DISABLE_SANDBOX: '1'
           QTWEBENGINE_CHROMIUM_FLAGS: '--no-sandbox --disable-gpu --disable-gpu-compositing'
         run: |
