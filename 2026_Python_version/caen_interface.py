@@ -3,15 +3,19 @@ from __future__ import annotations
 import ctypes
 import os
 import random
+import re
 import sys
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 try:
+    import serial
     from serial.tools import list_ports
 except ImportError:  # pragma: no cover - dependency-driven
+    serial = None
     list_ports = None
 
 MAX_PARAM_NAME = 10
@@ -30,27 +34,58 @@ USB_VCP_DATA_BITS_OPTIONS = ("5", "6", "7", "8")
 USB_VCP_STOP_BITS_OPTIONS = ("1", "1.5", "2")
 USB_VCP_PARITY_OPTIONS = ("None", "Even", "Odd", "Mark", "Space")
 
-CAEN_TRANSPORT_AUTO = "Auto"
+CAEN_WRAPPER_MODEL_N1471 = "N1471"
+CAEN_WRAPPER_MODEL_N1470 = "N1470"
+CAEN_WRAPPER_MODEL_OPTIONS = (CAEN_WRAPPER_MODEL_N1471, CAEN_WRAPPER_MODEL_N1470)
+CAEN_WRAPPER_MODEL_LABELS = {
+    CAEN_WRAPPER_MODEL_N1471: "N1471H / N1471",
+    CAEN_WRAPPER_MODEL_N1470: "N1470H / N1470",
+}
+
+CAEN_WRAPPER_CURRENT_SOURCE_AUTO = "Auto"
+CAEN_WRAPPER_CURRENT_SOURCE_IMONL = "IMonL"
+CAEN_WRAPPER_CURRENT_SOURCE_IMONH = "IMonH"
+CAEN_WRAPPER_CURRENT_SOURCE_IMON = "IMon"
+CAEN_WRAPPER_CURRENT_SOURCE_OPTIONS = (
+    CAEN_WRAPPER_CURRENT_SOURCE_AUTO,
+    CAEN_WRAPPER_CURRENT_SOURCE_IMONL,
+    CAEN_WRAPPER_CURRENT_SOURCE_IMONH,
+    CAEN_WRAPPER_CURRENT_SOURCE_IMON,
+)
+
+CAEN_TRANSPORT_DIRECT_SERIAL = "direct serial"
+CAEN_TRANSPORT_WRAPPER_AUTO = "wrapper auto"
 CAEN_TRANSPORT_LIBS = "caen-libs"
 CAEN_TRANSPORT_RAW_WRAPPER = "raw wrapper"
+CAEN_TRANSPORT_AUTO = CAEN_TRANSPORT_WRAPPER_AUTO  # backwards-compatible alias
 CAEN_TRANSPORT_OPTIONS = (
-    CAEN_TRANSPORT_AUTO,
+    CAEN_TRANSPORT_DIRECT_SERIAL,
+    CAEN_TRANSPORT_WRAPPER_AUTO,
     CAEN_TRANSPORT_LIBS,
     CAEN_TRANSPORT_RAW_WRAPPER,
 )
 
-CAEN_N1470_COMPATIBILITY_HINT = (
-    "N1470/N1470H support requires CAEN HV Wrapper Rel. 5.10+ "
+CAEN_N147X_COMPATIBILITY_HINT = (
+    "N1470/N1471 USB wrapper support requires CAEN HV Wrapper Rel. 5.10+ "
     "(December 2012); prefer 6.x."
 )
 CAEN_RAW_WRAPPER_HINT = (
     "If caen-libs fails, try Transport = raw wrapper to compare against the DLL path directly."
 )
+CAEN_RAW_WRAPPER_MODEL_HINT = (
+    "The raw wrapper backend uses the CAEN N14xx family system code (N1470 = 6) for both "
+    "N1470 and N1471."
+)
+CAEN_DIRECT_SERIAL_HINT = (
+    "The direct serial backend mirrors the legacy N1471A VISA-style control path bundled in this repo."
+)
+CAEN_DIRECT_SERIAL_COMPARE_HINT = (
+    "If direct serial fails, compare against wrapper auto, caen-libs, and raw wrapper."
+)
 
-PARAMETER_ALIAS_SETS = {
+REQUIRED_PARAMETER_ALIAS_SETS = {
     "voltage_set": ("V0Set", "VSet", "VSET"),
     "voltage_monitor": ("VMon", "VMON"),
-    "current_monitor": ("IMon", "IMON"),
     "power": ("Pw", "PW"),
     "status": ("Status", "STAT"),
     "ramp_up": ("RUp", "RUP"),
@@ -97,6 +132,46 @@ def normalize_usb_vcp_com_port(value: str) -> str:
     return port.upper()
 
 
+def format_wrapper_model_label(model_name: str) -> str:
+    return CAEN_WRAPPER_MODEL_LABELS.get(model_name, model_name)
+
+
+def _current_monitor_auto_order(model_name: str) -> tuple[str, ...]:
+    if model_name == CAEN_WRAPPER_MODEL_N1470:
+        return (
+            CAEN_WRAPPER_CURRENT_SOURCE_IMON,
+            CAEN_WRAPPER_CURRENT_SOURCE_IMONL,
+            CAEN_WRAPPER_CURRENT_SOURCE_IMONH,
+        )
+    return (
+        CAEN_WRAPPER_CURRENT_SOURCE_IMONL,
+        CAEN_WRAPPER_CURRENT_SOURCE_IMONH,
+        CAEN_WRAPPER_CURRENT_SOURCE_IMON,
+    )
+
+
+def _available_caen_enum_names(enum_obj: object) -> list[str]:
+    try:
+        return [str(member.name) for member in enum_obj]
+    except TypeError:
+        names: list[str] = []
+        for name in dir(enum_obj):
+            if name.startswith("_"):
+                continue
+            value = getattr(enum_obj, name)
+            if callable(value):
+                continue
+            names.append(str(name))
+        return sorted(set(names))
+
+
+def format_usb_serial_settings(settings: UsbVcpSettings) -> str:
+    return (
+        f"port={settings.normalized_com_port} baud={int(settings.baud)} "
+        f"data={int(settings.data_bits)} stop={settings.stop_bits} parity={settings.parity}"
+    )
+
+
 def format_caen_connection_error(
     *,
     backend_label: str,
@@ -107,7 +182,7 @@ def format_caen_connection_error(
     hints: Sequence[str] = (),
 ) -> str:
     parts = [
-        f"Failed to open CAEN N1470 on {settings.com_port} via {backend_label}.",
+        f"Failed to open CAEN {settings.wrapper_model_label} on {settings.normalized_com_port} via {backend_label}.",
         f"USB-VCP argument: {settings.build_argument()}.",
         detail.rstrip(".") + ".",
     ]
@@ -131,15 +206,35 @@ def format_caen_auto_connection_error(
     return _join_sentence_parts(
         [
             (
-                "Failed to open CAEN N1470 via Auto after trying "
+                f"Failed to open CAEN {settings.wrapper_model_label} via wrapper auto after trying "
                 f"{CAEN_TRANSPORT_LIBS} then {CAEN_TRANSPORT_RAW_WRAPPER}."
             ),
             f"USB-VCP argument: {settings.build_argument()}.",
             " ".join(attempt_summaries),
             "Use Transport = caen-libs or raw wrapper to compare the two code paths directly.",
-            CAEN_N1470_COMPATIBILITY_HINT,
+            CAEN_N147X_COMPATIBILITY_HINT,
         ]
     )
+
+
+def format_direct_serial_error(
+    *,
+    settings: UsbVcpSettings,
+    detail: str,
+    error_text: str | None = None,
+    hints: Sequence[str] = (),
+) -> str:
+    parts = [
+        f"Failed to open CAEN {settings.wrapper_model_label} on {settings.normalized_com_port} via {CAEN_TRANSPORT_DIRECT_SERIAL}.",
+        f"Serial settings: {format_usb_serial_settings(settings)}.",
+        detail.rstrip(".") + ".",
+    ]
+    if error_text:
+        parts.append(f"Serial: {str(error_text).strip()}.")
+    for hint in hints:
+        if hint:
+            parts.append(hint.rstrip(".") + ".")
+    return _join_sentence_parts(parts)
 
 
 def format_status_text(status_code: int) -> str:
@@ -169,12 +264,14 @@ class FieldConfig:
 @dataclass(frozen=True)
 class UsbVcpSettings:
     com_port: str
-    transport: str = CAEN_TRANSPORT_AUTO
+    transport: str = CAEN_TRANSPORT_DIRECT_SERIAL
     baud: int = USB_VCP_BAUD
     data_bits: int = USB_VCP_DATA_BITS
     stop_bits: str = USB_VCP_STOP_BITS
     parity: str = USB_VCP_PARITY
     board_number: int = USB_VCP_BOARD_NUMBER
+    wrapper_model: str = CAEN_WRAPPER_MODEL_N1471
+    wrapper_current_source: str = CAEN_WRAPPER_CURRENT_SOURCE_AUTO
 
     def build_argument(self) -> str:
         return CAENWrapperInterface.build_usb_vcp_argument(
@@ -190,8 +287,14 @@ class UsbVcpSettings:
     def normalized_com_port(self) -> str:
         return normalize_usb_vcp_com_port(self.com_port)
 
+    @property
+    def wrapper_model_label(self) -> str:
+        return format_wrapper_model_label(self.wrapper_model)
+
     def transport_order(self) -> tuple[str, ...]:
-        if self.transport == CAEN_TRANSPORT_AUTO:
+        if self.transport == CAEN_TRANSPORT_DIRECT_SERIAL:
+            return (CAEN_TRANSPORT_DIRECT_SERIAL,)
+        if self.transport == CAEN_TRANSPORT_WRAPPER_AUTO:
             return (CAEN_TRANSPORT_LIBS, CAEN_TRANSPORT_RAW_WRAPPER)
         if self.transport in (CAEN_TRANSPORT_LIBS, CAEN_TRANSPORT_RAW_WRAPPER):
             return (self.transport,)
@@ -501,6 +604,570 @@ class SimulationInterface(BaseCaenInterface):
         return sign * magnitude
 
 
+DIRECT_SERIAL_STATUS_ON_MASK = 0x1
+DIRECT_SERIAL_RESPONSE_TIMEOUT_S = 0.8
+DIRECT_SERIAL_IDLE_WAIT_S = 0.05
+DIRECT_SERIAL_MODULE_ADDRESS = 0
+
+DIRECT_SERIAL_PARAM_VMON = "VMON"
+DIRECT_SERIAL_PARAM_IMON = "IMON"
+DIRECT_SERIAL_PARAM_STAT = "STAT"
+DIRECT_SERIAL_PARAM_VSET = "VSET"
+DIRECT_SERIAL_PARAM_RUP = "RUP"
+DIRECT_SERIAL_PARAM_RDW = "RDW"
+DIRECT_SERIAL_PARAM_BDNCH = "BDNCH"
+DIRECT_SERIAL_PARAM_BDNAME = "BDNAME"
+DIRECT_SERIAL_PARAM_POWER = "PW"
+DIRECT_SERIAL_ACTION_ON = "ON"
+DIRECT_SERIAL_ACTION_OFF = "OFF"
+
+
+def _format_direct_serial_value(value: float | int | str) -> str:
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        text = f"{value:.6g}"
+        return text if text else "0"
+    return str(value)
+
+
+def _normalize_direct_serial_field_name(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "", name).upper()
+
+
+def _looks_like_direct_serial_scalar(text: str) -> bool:
+    candidate = text.strip()
+    if not candidate:
+        return False
+    try:
+        int(candidate, 0)
+        return True
+    except ValueError:
+        pass
+    try:
+        float(candidate)
+        return True
+    except ValueError:
+        return False
+
+
+def _maybe_parse_int(text: str | None) -> int | None:
+    if text is None:
+        return None
+    candidate = text.strip()
+    if not candidate:
+        return None
+    try:
+        return int(candidate, 0)
+    except ValueError:
+        try:
+            return int(float(candidate))
+        except ValueError:
+            return None
+
+
+@dataclass(frozen=True)
+class DirectSerialProtocol:
+    name: str
+    include_board: bool = True
+    command_prefix: str = "$"
+    terminator: str = "\r"
+
+    def build_module_monitor_command(self, param: str, board: int = DIRECT_SERIAL_MODULE_ADDRESS) -> str:
+        return self._build_command("MON", board=board, param=param)
+
+    def build_channel_monitor_command(self, channel: int, param: str, board: int = DIRECT_SERIAL_MODULE_ADDRESS) -> str:
+        return self._build_command("MON", board=board, channel=channel, param=param)
+
+    def build_channel_set_command(
+        self,
+        channel: int,
+        param: str,
+        value: float | int | str,
+        board: int = DIRECT_SERIAL_MODULE_ADDRESS,
+    ) -> str:
+        return self._build_command("SET", board=board, channel=channel, param=param, value=value)
+
+    def build_channel_action_command(
+        self, channel: int, action: str, board: int = DIRECT_SERIAL_MODULE_ADDRESS
+    ) -> str:
+        return self._build_command("SET", board=board, channel=channel, param=action)
+
+    def _build_command(
+        self,
+        command: str,
+        *,
+        board: int,
+        channel: int | None = None,
+        param: str,
+        value: float | int | str | None = None,
+    ) -> str:
+        tokens: list[str] = []
+        if self.include_board:
+            tokens.append(f"BD:{int(board)}")
+        tokens.append(f"CMD:{command}")
+        if channel is not None:
+            tokens.append(f"CH:{int(channel)}")
+        tokens.append(f"PAR:{param}")
+        if value is not None:
+            tokens.append(f"VAL:{_format_direct_serial_value(value)}")
+        return self.command_prefix + ",".join(tokens)
+
+
+DIRECT_SERIAL_PROTOCOLS = (
+    DirectSerialProtocol("caen-psm"),
+    DirectSerialProtocol("caen-psm-no-board", include_board=False),
+)
+
+
+@dataclass(frozen=True)
+class DirectSerialResponse:
+    raw: str
+    fields: Mapping[str, str]
+    values: tuple[str, ...]
+    status: str | None
+    code: int | None
+
+    @classmethod
+    def from_raw(cls, raw: str, command: str | None = None) -> "DirectSerialResponse":
+        cleaned = raw.replace("\x00", "").strip()
+        if command and cleaned.startswith(command) and "#" in cleaned:
+            cleaned = cleaned[cleaned.rfind("#") :]
+        elif "#" in cleaned:
+            cleaned = cleaned[cleaned.rfind("#") :]
+        else:
+            lines = [line.strip() for line in re.split(r"[\r\n]+", cleaned) if line.strip()]
+            if lines:
+                for candidate in reversed(lines):
+                    if command and candidate == command:
+                        continue
+                    cleaned = candidate
+                    break
+        if command and cleaned == command:
+            cleaned = ""
+
+        fields: dict[str, str] = {}
+        loose_tokens: list[str] = []
+        for segment in re.split(r"[;,]", cleaned):
+            token = segment.strip()
+            if not token:
+                continue
+            if ":" in token:
+                key, value = token.split(":", 1)
+                fields[_normalize_direct_serial_field_name(key)] = value.strip()
+                continue
+            if "=" in token:
+                key, value = token.split("=", 1)
+                fields[_normalize_direct_serial_field_name(key)] = value.strip()
+                continue
+            loose_tokens.append(token)
+
+        status = next(
+            (
+                value
+                for value in (
+                    fields.get("CMD"),
+                    fields.get("STATUS"),
+                    fields.get("RESP"),
+                    fields.get("RESPONSE"),
+                )
+                if value is not None
+            ),
+            None,
+        )
+
+        value_text = next(
+            (
+                value
+                for value in (
+                    fields.get("VAL"),
+                    fields.get("VALUE"),
+                    fields.get("VALUES"),
+                )
+                if value is not None
+            ),
+            None,
+        )
+
+        values: list[str]
+        if value_text is not None:
+            values = [part.strip() for part in re.split(r"[|/]", value_text) if part.strip()]
+        else:
+            values = [
+                token
+                for token in loose_tokens
+                if token.upper() not in {"OK", "SUCCESS", "DONE", "ERR", "ERROR", "FAIL"}
+            ]
+            if not values and _looks_like_direct_serial_scalar(cleaned):
+                values = [cleaned]
+
+        if status is None and loose_tokens:
+            head = loose_tokens[0].upper()
+            if head in {"OK", "SUCCESS", "DONE", "ERR", "ERROR", "FAIL"}:
+                status = loose_tokens[0]
+                values = loose_tokens[1:]
+
+        return cls(
+            raw=cleaned,
+            fields=fields,
+            values=tuple(values),
+            status=status,
+            code=_maybe_parse_int(fields.get("CODE") or fields.get("ERR") or fields.get("ERROR")),
+        )
+
+    def is_success(self) -> bool:
+        if self.code is not None and self.code != 0:
+            return False
+        if self.status is not None:
+            normalized = self.status.strip().upper()
+            if any(word in normalized for word in ("ERR", "ERROR", "FAIL", "UNKNOWN")):
+                return False
+            if normalized in {"OK", "SUCCESS", "DONE"}:
+                return True
+        return bool(self.values or self.raw)
+
+    def first_value(self) -> str:
+        if not self.values:
+            raise RuntimeError(f"No value was returned by the direct serial command. Raw response: {self.raw}")
+        return self.values[0]
+
+
+class CaenDirectSerialInterface(BaseCaenInterface):
+    PRIMARY_PROTOCOL = DIRECT_SERIAL_PROTOCOLS[0]
+
+    def __init__(
+        self,
+        com_port: str | None = None,
+        *,
+        settings: UsbVcpSettings | None = None,
+        serial_factory: Callable[..., object] | None = None,
+        protocols: Sequence[DirectSerialProtocol] | None = None,
+    ) -> None:
+        if settings is None:
+            if not com_port:
+                raise ValueError("A COM port is required for the CAEN USB-VCP backend.")
+            settings = UsbVcpSettings(com_port=com_port)
+        self.settings = settings
+        self.com_port = settings.com_port
+        self._serial_factory = serial_factory
+        self._protocols = tuple(protocols or DIRECT_SERIAL_PROTOCOLS)
+        self._serial = None
+        self._active_protocol: DirectSerialProtocol | None = None
+        self._connected = False
+
+    def connect(self) -> None:
+        try:
+            self._serial = self._open_serial_port()
+            self._active_protocol = self._detect_protocol()
+            self._connected = True
+        except Exception as exc:  # pragma: no cover - hardware-dependent
+            self.disconnect()
+            raise RuntimeError(
+                format_direct_serial_error(
+                    settings=self.settings,
+                    detail="The direct serial protocol probe failed",
+                    error_text=str(exc),
+                    hints=(CAEN_DIRECT_SERIAL_HINT, CAEN_DIRECT_SERIAL_COMPARE_HINT),
+                )
+            ) from exc
+
+    def disconnect(self) -> None:
+        handle, self._serial = self._serial, None
+        self._active_protocol = None
+        self._connected = False
+        if handle is not None:
+            try:
+                handle.close()
+            except Exception:
+                pass
+
+    def connection_name(self) -> str:
+        return "CAEN USB-VCP via direct serial"
+
+    def read_all_channels(self) -> list[ChannelSnapshot]:
+        self._ensure_connected()
+        snapshots: list[ChannelSnapshot] = []
+        for channel in CHANNEL_DEFINITIONS:
+            voltage = abs(self._read_channel_float(channel.channel_index, DIRECT_SERIAL_PARAM_VMON))
+            current = self._normalize_current(channel, self._read_channel_float(channel.channel_index, DIRECT_SERIAL_PARAM_IMON))
+            status_code = self._read_channel_int(channel.channel_index, DIRECT_SERIAL_PARAM_STAT)
+            snapshots.append(
+                ChannelSnapshot(
+                    label=channel.label,
+                    channel_index=channel.channel_index,
+                    polarity=channel.polarity,
+                    vmon_v=voltage,
+                    imon_na=current,
+                    is_on=bool(status_code & DIRECT_SERIAL_STATUS_ON_MASK),
+                    status_code=status_code,
+                    status_text=format_status_text(status_code),
+                )
+            )
+        return snapshots
+
+    def set_ramp_rates(self, ramp_up_v_s: float, ramp_down_v_s: float) -> None:
+        self._ensure_connected()
+        for channel in CHANNEL_DEFINITIONS:
+            self._set_channel_value(channel.channel_index, DIRECT_SERIAL_PARAM_RUP, float(ramp_up_v_s))
+            self._set_channel_value(channel.channel_index, DIRECT_SERIAL_PARAM_RDW, float(ramp_down_v_s))
+
+    def set_channel_voltages(self, voltages_by_label: Mapping[str, float]) -> None:
+        self._ensure_connected()
+        for label, voltage_v in voltages_by_label.items():
+            self._set_channel_value(CHANNEL_BY_LABEL[label].channel_index, DIRECT_SERIAL_PARAM_VSET, float(voltage_v))
+
+    def power_on_channels(self, labels: Sequence[str]) -> None:
+        self._ensure_connected()
+        for label in labels:
+            self._set_channel_power(CHANNEL_BY_LABEL[label].channel_index, True)
+
+    def power_off_channels(self, labels: Sequence[str]) -> None:
+        self._ensure_connected()
+        for label in labels:
+            self._set_channel_power(CHANNEL_BY_LABEL[label].channel_index, False)
+
+    def safe_shutdown(self, labels: Sequence[str]) -> None:
+        self._ensure_connected()
+        self.set_channel_voltages({label: 1.0 for label in labels})
+
+    def _open_serial_port(self):
+        factory = self._serial_factory
+        if factory is None:
+            if serial is None:
+                raise RuntimeError("pyserial is not available")
+            factory = serial.Serial
+        try:
+            return factory(
+                port=self.settings.normalized_com_port,
+                baudrate=int(self.settings.baud),
+                bytesize=int(self.settings.data_bits),
+                parity=self._serial_parity(),
+                stopbits=self._serial_stop_bits(),
+                timeout=0.15,
+                write_timeout=0.15,
+                xonxoff=False,
+                rtscts=False,
+                dsrdtr=False,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                format_direct_serial_error(
+                    settings=self.settings,
+                    detail="Could not open the serial port",
+                    error_text=str(exc),
+                    hints=(CAEN_DIRECT_SERIAL_HINT,),
+                )
+            ) from exc
+
+    def _serial_parity(self):
+        mapping = {
+            "none": "N",
+            "even": "E",
+            "odd": "O",
+            "mark": "M",
+            "space": "S",
+        }
+        if serial is not None:
+            mapping = {
+                "none": serial.PARITY_NONE,
+                "even": serial.PARITY_EVEN,
+                "odd": serial.PARITY_ODD,
+                "mark": serial.PARITY_MARK,
+                "space": serial.PARITY_SPACE,
+            }
+        try:
+            return mapping[self.settings.parity.strip().lower()]
+        except KeyError as exc:
+            raise RuntimeError(f"Unsupported direct serial parity: {self.settings.parity}") from exc
+
+    def _serial_stop_bits(self):
+        mapping = {
+            "1": 1,
+            "1.5": 1.5,
+            "2": 2,
+        }
+        if serial is not None:
+            mapping = {
+                "1": serial.STOPBITS_ONE,
+                "1.5": serial.STOPBITS_ONE_POINT_FIVE,
+                "2": serial.STOPBITS_TWO,
+            }
+        try:
+            return mapping[str(self.settings.stop_bits)]
+        except KeyError as exc:
+            raise RuntimeError(f"Unsupported direct serial stop bits: {self.settings.stop_bits}") from exc
+
+    def _detect_protocol(self) -> DirectSerialProtocol:
+        attempts: list[str] = []
+        for protocol in self._protocols:
+            try:
+                board_response = self._query_with_protocol(
+                    protocol,
+                    protocol.build_module_monitor_command(DIRECT_SERIAL_PARAM_BDNCH),
+                    expect_value=True,
+                )
+                board_channels = int(float(board_response.first_value()))
+                if board_channels >= len(CHANNEL_DEFINITIONS):
+                    return protocol
+            except Exception as exc:
+                attempts.append(f"{protocol.name} BDNCH: {exc}")
+            try:
+                name_response = self._query_with_protocol(
+                    protocol,
+                    protocol.build_module_monitor_command(DIRECT_SERIAL_PARAM_BDNAME),
+                    expect_value=True,
+                )
+                if name_response.first_value():
+                    return protocol
+            except Exception as exc:
+                attempts.append(f"{protocol.name} BDNAME: {exc}")
+            try:
+                vmon_response = self._query_with_protocol(
+                    protocol,
+                    protocol.build_channel_monitor_command(0, DIRECT_SERIAL_PARAM_VMON),
+                    expect_value=True,
+                )
+                float(vmon_response.first_value())
+                return protocol
+            except Exception as exc:
+                attempts.append(f"{protocol.name} VMON: {exc}")
+
+        raise RuntimeError("No supported direct serial probe succeeded. " + " ".join(attempts))
+
+    def _read_channel_float(self, channel_index: int, param: str) -> float:
+        response = self._query_with_protocol(
+            self._require_protocol(),
+            self._require_protocol().build_channel_monitor_command(channel_index, param),
+            expect_value=True,
+        )
+        return float(response.first_value())
+
+    def _read_channel_int(self, channel_index: int, param: str) -> int:
+        response = self._query_with_protocol(
+            self._require_protocol(),
+            self._require_protocol().build_channel_monitor_command(channel_index, param),
+            expect_value=True,
+        )
+        parsed = _maybe_parse_int(response.first_value())
+        if parsed is None:
+            raise RuntimeError(f"Could not parse integer from direct serial response: {response.raw}")
+        return parsed
+
+    def _set_channel_value(self, channel_index: int, param: str, value: float) -> None:
+        self._query_with_protocol(
+            self._require_protocol(),
+            self._require_protocol().build_channel_set_command(channel_index, param, value),
+            expect_value=False,
+        )
+
+    def _set_channel_power(self, channel_index: int, on: bool) -> None:
+        protocol = self._require_protocol()
+        action = DIRECT_SERIAL_ACTION_ON if on else DIRECT_SERIAL_ACTION_OFF
+        attempts = (
+            protocol.build_channel_action_command(channel_index, action),
+            protocol.build_channel_set_command(channel_index, DIRECT_SERIAL_PARAM_POWER, 1 if on else 0),
+        )
+        errors: list[str] = []
+        for command in attempts:
+            try:
+                self._query_with_protocol(protocol, command, expect_value=False)
+                return
+            except Exception as exc:
+                errors.append(str(exc))
+        raise RuntimeError(" ; ".join(errors))
+
+    def _query_with_protocol(
+        self,
+        protocol: DirectSerialProtocol,
+        command: str,
+        *,
+        expect_value: bool,
+    ) -> DirectSerialResponse:
+        raw_response = self._write_and_read(command + protocol.terminator)
+        if not raw_response.strip():
+            raise RuntimeError(f"No response received for direct serial command {command!r}")
+        response = DirectSerialResponse.from_raw(raw_response, command)
+        if not response.is_success():
+            raise RuntimeError(f"Direct serial command {command!r} failed. Response: {response.raw}")
+        if expect_value and not response.values:
+            raise RuntimeError(f"Direct serial command {command!r} returned no value. Response: {response.raw}")
+        return response
+
+    def _write_and_read(self, wire_command: str) -> str:
+        handle = self._serial
+        if handle is None:
+            raise RuntimeError("The direct serial port is not open.")
+        try:
+            if hasattr(handle, "reset_input_buffer"):
+                handle.reset_input_buffer()
+            if hasattr(handle, "reset_output_buffer"):
+                handle.reset_output_buffer()
+            handle.write(wire_command.encode("ascii"))
+            if hasattr(handle, "flush"):
+                handle.flush()
+        except Exception as exc:
+            raise RuntimeError(f"Failed to write direct serial command {wire_command!r}: {exc}") from exc
+
+        chunks: list[bytes] = []
+        deadline = time.monotonic() + DIRECT_SERIAL_RESPONSE_TIMEOUT_S
+        idle_deadline: float | None = None
+
+        while time.monotonic() < deadline:
+            waiting = self._in_waiting()
+            if waiting > 0:
+                chunk = handle.read(waiting)
+                if chunk:
+                    chunks.append(chunk)
+                    idle_deadline = time.monotonic() + DIRECT_SERIAL_IDLE_WAIT_S
+                    continue
+            else:
+                chunk = handle.read(1)
+                if chunk:
+                    chunks.append(chunk)
+                    idle_deadline = time.monotonic() + DIRECT_SERIAL_IDLE_WAIT_S
+                    continue
+            if idle_deadline is not None and time.monotonic() >= idle_deadline:
+                break
+            time.sleep(0.01)
+
+        return b"".join(chunks).decode("ascii", errors="replace")
+
+    def _in_waiting(self) -> int:
+        handle = self._serial
+        if handle is None:
+            return 0
+        try:
+            waiting = getattr(handle, "in_waiting", 0)
+            if callable(waiting):
+                waiting = waiting()
+            return int(waiting or 0)
+        except Exception:
+            return 0
+
+    def _normalize_current(self, channel: ChannelDefinition, current_na: float) -> float:
+        if channel.polarity == "-" and current_na > 0.0:
+            return -current_na
+        if channel.polarity == "+" and current_na < 0.0:
+            return -current_na
+        return current_na
+
+    def _ensure_connected(self) -> None:
+        if not self._connected or self._serial is None or self._active_protocol is None:
+            raise RuntimeError("CAEN direct serial backend is not connected.")
+
+    def _require_protocol(self) -> DirectSerialProtocol:
+        self._ensure_connected()
+        assert self._active_protocol is not None
+        return self._active_protocol
+
+    def _require_serial_handle(self):
+        self._ensure_connected()
+        assert self._serial is not None
+        return self._serial
+
+
 class CAENWrapperInterface(BaseCaenInterface):
     def __init__(
         self,
@@ -538,12 +1205,12 @@ class CAENWrapperInterface(BaseCaenInterface):
         )
 
     @staticmethod
-    def resolve_parameter_names(parameter_names: Sequence[str]) -> dict[str, str]:
+    def resolve_required_parameter_names(parameter_names: Sequence[str]) -> dict[str, str]:
         resolved: dict[str, str] = {}
         by_lower = {name.lower(): name for name in parameter_names}
         missing: list[str] = []
 
-        for semantic_name, aliases in PARAMETER_ALIAS_SETS.items():
+        for semantic_name, aliases in REQUIRED_PARAMETER_ALIAS_SETS.items():
             matched = next((by_lower.get(alias.lower()) for alias in aliases if alias.lower() in by_lower), None)
             if matched is None:
                 missing.append(semantic_name)
@@ -554,6 +1221,51 @@ class CAENWrapperInterface(BaseCaenInterface):
             missing_list = ", ".join(missing)
             raise RuntimeError(f"Missing required CAEN parameters: {missing_list}")
 
+        return resolved
+
+    @staticmethod
+    def resolve_current_monitor_name(parameter_names: Sequence[str], settings: UsbVcpSettings) -> str:
+        by_lower = {name.lower(): name for name in parameter_names}
+        available_current_names = [
+            matched
+            for matched in (
+                by_lower.get(CAEN_WRAPPER_CURRENT_SOURCE_IMON.lower()),
+                by_lower.get(CAEN_WRAPPER_CURRENT_SOURCE_IMONH.lower()),
+                by_lower.get(CAEN_WRAPPER_CURRENT_SOURCE_IMONL.lower()),
+            )
+            if matched is not None
+        ]
+        available_text = ", ".join(dict.fromkeys(available_current_names)) or "none"
+
+        if settings.wrapper_current_source == CAEN_WRAPPER_CURRENT_SOURCE_AUTO:
+            for candidate in _current_monitor_auto_order(settings.wrapper_model):
+                matched = by_lower.get(candidate.lower())
+                if matched is not None:
+                    return matched
+            raise RuntimeError(
+                "No supported current monitor parameter was found for "
+                f"{settings.wrapper_model_label}. Available current parameters: {available_text}. "
+                "Try a wrapper transport only after confirming the board reports IMon, IMonH, or IMonL."
+            )
+
+        matched = by_lower.get(settings.wrapper_current_source.lower())
+        if matched is not None:
+            return matched
+        raise RuntimeError(
+            f"Current source {settings.wrapper_current_source} is not supported by {settings.wrapper_model_label}. "
+            f"Available current parameters: {available_text}. Try Current source = Auto."
+        )
+
+    @classmethod
+    def resolve_parameter_names(
+        cls,
+        parameter_names: Sequence[str],
+        settings: UsbVcpSettings | None = None,
+    ) -> dict[str, str]:
+        if settings is None:
+            settings = UsbVcpSettings(com_port="COM1")
+        resolved = cls.resolve_required_parameter_names(parameter_names)
+        resolved["current_monitor"] = cls.resolve_current_monitor_name(parameter_names, settings)
         return resolved
 
     def connect(self) -> None:
@@ -585,14 +1297,26 @@ class CAENWrapperInterface(BaseCaenInterface):
                     detail="CAENHV_InitSystem failed",
                     code=result,
                     error_text=error_text,
-                    hints=(CAEN_N1470_COMPATIBILITY_HINT,),
+                    hints=(CAEN_RAW_WRAPPER_MODEL_HINT, CAEN_N147X_COMPATIBILITY_HINT),
                 )
             )
 
-        self._slot_index = self._resolve_slot_index()
-        raw_parameter_names = self._read_parameter_names(self._slot_index, 0)
-        self._parameter_names = self.resolve_parameter_names(raw_parameter_names)
-        self._connected = True
+        try:
+            self._slot_index = self._resolve_slot_index()
+            raw_parameter_names = self._read_parameter_names(self._slot_index, 0)
+            self._parameter_names = self.resolve_parameter_names(raw_parameter_names, self.settings)
+            self._connected = True
+        except Exception as exc:
+            self._reset_connection_state()
+            raise RuntimeError(
+                format_caen_connection_error(
+                    backend_label=CAEN_TRANSPORT_RAW_WRAPPER,
+                    settings=self.settings,
+                    detail="The device opened but channel metadata could not be read",
+                    error_text=str(exc),
+                    hints=(CAEN_RAW_WRAPPER_MODEL_HINT, CAEN_N147X_COMPATIBILITY_HINT),
+                )
+            ) from exc
 
     def connection_name(self) -> str:
         return "CAEN USB-VCP via raw wrapper"
@@ -896,7 +1620,7 @@ class CAENWrapperInterface(BaseCaenInterface):
 
 
 class CaenLibsInterface(BaseCaenInterface):
-    """CAEN N1470 over USB-VCP using the official ``caen-libs`` (CAEN HV Wrapper)
+    """CAEN N147x over USB-VCP using the official ``caen-libs`` (CAEN HV Wrapper)
     Python bindings.
 
     Same parameter model as :class:`CAENWrapperInterface` (it reuses the static
@@ -929,31 +1653,42 @@ class CaenLibsInterface(BaseCaenInterface):
                     settings=self.settings,
                     detail="The CAEN HV Wrapper library / caen-libs is not available",
                     error_text=str(exc),
-                    hints=(CAEN_RAW_WRAPPER_HINT, CAEN_N1470_COMPATIBILITY_HINT),
+                    hints=(CAEN_RAW_WRAPPER_HINT, CAEN_N147X_COMPATIBILITY_HINT),
+                )
+            ) from exc
+
+        try:
+            system_type = self._resolve_system_type(hv.SystemType, self.settings.wrapper_model)
+        except Exception as exc:
+            raise RuntimeError(
+                format_caen_connection_error(
+                    backend_label=CAEN_TRANSPORT_LIBS,
+                    settings=self.settings,
+                    detail=f"caen-libs does not expose SystemType.{self.settings.wrapper_model}",
+                    error_text=str(exc),
+                    hints=(CAEN_RAW_WRAPPER_HINT, CAEN_N147X_COMPATIBILITY_HINT),
                 )
             ) from exc
 
         argument = self.settings.build_argument()
         try:
-            self._device = hv.Device.open(
-                hv.SystemType.N1470, hv.LinkType.USB_VCP, argument, "", ""
-            )
+            self._device = hv.Device.open(system_type, hv.LinkType.USB_VCP, argument, "", "")
         except Exception as exc:  # pragma: no cover - hardware-dependent
             self._device = None
             raise RuntimeError(
                 format_caen_connection_error(
                     backend_label=CAEN_TRANSPORT_LIBS,
                     settings=self.settings,
-                    detail="Device.open failed while opening SystemType.N1470 over USB_VCP",
+                    detail=f"Device.open failed while opening SystemType.{self.settings.wrapper_model} over USB_VCP",
                     error_text=str(exc),
-                    hints=(CAEN_RAW_WRAPPER_HINT, CAEN_N1470_COMPATIBILITY_HINT),
+                    hints=(CAEN_RAW_WRAPPER_HINT, CAEN_N147X_COMPATIBILITY_HINT),
                 )
             ) from exc
 
         try:
             self._slot = self._resolve_slot()
             raw_names = self._device.get_ch_param_info(self._slot, 0)
-            self._parameter_names = CAENWrapperInterface.resolve_parameter_names(list(raw_names))
+            self._parameter_names = CAENWrapperInterface.resolve_parameter_names(list(raw_names), self.settings)
             self._connected = True
         except Exception as exc:  # pragma: no cover - hardware-dependent
             self.disconnect()
@@ -963,7 +1698,7 @@ class CaenLibsInterface(BaseCaenInterface):
                     settings=self.settings,
                     detail="The device opened but channel metadata could not be read",
                     error_text=str(exc),
-                    hints=(CAEN_RAW_WRAPPER_HINT, CAEN_N1470_COMPATIBILITY_HINT),
+                    hints=(CAEN_RAW_WRAPPER_HINT, CAEN_N147X_COMPATIBILITY_HINT),
                 )
             ) from exc
 
@@ -1028,6 +1763,14 @@ class CaenLibsInterface(BaseCaenInterface):
     def _channel_indices() -> list[int]:
         return [channel.channel_index for channel in CHANNEL_DEFINITIONS]
 
+    @staticmethod
+    def _resolve_system_type(system_types: object, model_name: str):
+        member = getattr(system_types, model_name, None)
+        if member is not None:
+            return member
+        available = ", ".join(_available_caen_enum_names(system_types)) or "none detected"
+        raise RuntimeError(f"Available SystemType members: {available}")
+
     def _get_floats(self, semantic: str, channels: Sequence[int]) -> list[float]:
         values = self._device.get_ch_param(self._slot, list(channels), self._parameter_names[semantic])
         return [float(v) for v in values]
@@ -1054,6 +1797,7 @@ class CaenUsbVcpInterface(BaseCaenInterface):
         self._backend_factories = dict(
             backend_factories
             or {
+                CAEN_TRANSPORT_DIRECT_SERIAL: lambda: CaenDirectSerialInterface(settings=settings),
                 CAEN_TRANSPORT_LIBS: lambda: CaenLibsInterface(settings=settings),
                 CAEN_TRANSPORT_RAW_WRAPPER: lambda: CAENWrapperInterface(settings=settings),
             }
@@ -1078,7 +1822,7 @@ class CaenUsbVcpInterface(BaseCaenInterface):
             self._transport_in_use = transport
             return
 
-        if self.settings.transport == CAEN_TRANSPORT_AUTO:
+        if self.settings.transport == CAEN_TRANSPORT_WRAPPER_AUTO:
             raise RuntimeError(format_caen_auto_connection_error(self.settings, attempt_errors))
         if attempt_errors:
             raise RuntimeError(attempt_errors[0][1])

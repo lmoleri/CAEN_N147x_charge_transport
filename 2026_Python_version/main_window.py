@@ -8,7 +8,13 @@ from pathlib import Path
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from caen_interface import (
+    CAEN_TRANSPORT_DIRECT_SERIAL,
     CAEN_TRANSPORT_OPTIONS,
+    CAEN_WRAPPER_CURRENT_SOURCE_AUTO,
+    CAEN_WRAPPER_CURRENT_SOURCE_OPTIONS,
+    CAEN_WRAPPER_MODEL_LABELS,
+    CAEN_WRAPPER_MODEL_N1471,
+    CAEN_WRAPPER_MODEL_OPTIONS,
     CHANNEL_DEFINITIONS,
     CHANNEL_LABELS,
     BaseCaenInterface,
@@ -282,8 +288,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.disconnect_button.clicked.connect(self._queue_disconnect)
 
         self.backend_hint_label = QtWidgets.QLabel(
-            "Simulation works everywhere. CAEN USB-VCP uses the CAEN HV Wrapper library "
-            "(install it from caen.it on the Windows lab PC)."
+            "Simulation works everywhere. CAEN USB-VCP defaults to the legacy direct serial path for "
+            "the N1471H lab supply; wrapper transports remain available for comparison on the "
+            "Windows lab PC."
         )
         self.backend_hint_label.setWordWrap(True)
 
@@ -292,10 +299,24 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.transport_combo = QtWidgets.QComboBox()
         self.transport_combo.addItems(list(CAEN_TRANSPORT_OPTIONS))
+        self.transport_combo.currentTextChanged.connect(self._on_transport_selection_changed)
 
+        self.board_number_label = QtWidgets.QLabel("Board / LBus")
         self.board_number_spin = QtWidgets.QSpinBox()
         self.board_number_spin.setRange(0, 31)
         self.board_number_spin.setValue(USB_VCP_BOARD_NUMBER)
+
+        self.model_label = QtWidgets.QLabel("Model")
+        self.model_combo = QtWidgets.QComboBox()
+        for model_name in CAEN_WRAPPER_MODEL_OPTIONS:
+            self.model_combo.addItem(CAEN_WRAPPER_MODEL_LABELS[model_name], model_name)
+        self.model_combo.setCurrentIndex(self.model_combo.findData(CAEN_WRAPPER_MODEL_N1471))
+
+        self.current_source_label = QtWidgets.QLabel("Current source")
+        self.current_source_combo = QtWidgets.QComboBox()
+        for source_name in CAEN_WRAPPER_CURRENT_SOURCE_OPTIONS:
+            self.current_source_combo.addItem(source_name, source_name)
+        self.current_source_combo.setCurrentText(CAEN_WRAPPER_CURRENT_SOURCE_AUTO)
 
         self.baud_combo = QtWidgets.QComboBox()
         self.baud_combo.addItems(list(USB_VCP_BAUD_OPTIONS))
@@ -314,24 +335,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.parity_combo.setCurrentText(str(USB_VCP_PARITY))
 
         self.hardware_hint_label = QtWidgets.QLabel(
-            "USB-VCP tuple: COM_baud_data_stop_parity_board. Logger-aligned defaults are "
-            "COMx_9600_8_1_none_0."
+            "Direct serial uses COM/baud/data/stop/parity. Wrapper tuple is "
+            "COM_baud_data_stop_parity_board; logger-aligned defaults are COMx_9600_8_1_none_0. "
+            "Model/current-source are wrapper-only troubleshooting controls."
         )
         self.hardware_hint_label.setWordWrap(True)
 
         hardware_layout.addWidget(QtWidgets.QLabel("Transport"), 0, 0)
         hardware_layout.addWidget(self.transport_combo, 0, 1)
-        hardware_layout.addWidget(QtWidgets.QLabel("Board"), 0, 2)
+        hardware_layout.addWidget(self.board_number_label, 0, 2)
         hardware_layout.addWidget(self.board_number_spin, 0, 3)
-        hardware_layout.addWidget(QtWidgets.QLabel("Baud"), 1, 0)
-        hardware_layout.addWidget(self.baud_combo, 1, 1)
-        hardware_layout.addWidget(QtWidgets.QLabel("Data bits"), 1, 2)
-        hardware_layout.addWidget(self.data_bits_combo, 1, 3)
-        hardware_layout.addWidget(QtWidgets.QLabel("Stop bits"), 2, 0)
-        hardware_layout.addWidget(self.stop_bits_combo, 2, 1)
-        hardware_layout.addWidget(QtWidgets.QLabel("Parity"), 2, 2)
-        hardware_layout.addWidget(self.parity_combo, 2, 3)
-        hardware_layout.addWidget(self.hardware_hint_label, 3, 0, 1, 4)
+        hardware_layout.addWidget(self.model_label, 1, 0)
+        hardware_layout.addWidget(self.model_combo, 1, 1)
+        hardware_layout.addWidget(self.current_source_label, 1, 2)
+        hardware_layout.addWidget(self.current_source_combo, 1, 3)
+        hardware_layout.addWidget(QtWidgets.QLabel("Baud"), 2, 0)
+        hardware_layout.addWidget(self.baud_combo, 2, 1)
+        hardware_layout.addWidget(QtWidgets.QLabel("Data bits"), 2, 2)
+        hardware_layout.addWidget(self.data_bits_combo, 2, 3)
+        hardware_layout.addWidget(QtWidgets.QLabel("Stop bits"), 3, 0)
+        hardware_layout.addWidget(self.stop_bits_combo, 3, 1)
+        hardware_layout.addWidget(QtWidgets.QLabel("Parity"), 3, 2)
+        hardware_layout.addWidget(self.parity_combo, 3, 3)
+        hardware_layout.addWidget(self.hardware_hint_label, 4, 0, 1, 4)
         hardware_layout.setColumnStretch(1, 1)
         hardware_layout.setColumnStretch(3, 1)
 
@@ -484,6 +510,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self.com_combo.setVisible(is_hardware)
         self.refresh_ports_button.setVisible(is_hardware)
         self.hardware_settings_group.setVisible(is_hardware)
+        self._on_transport_selection_changed()
+
+    def _on_transport_selection_changed(self) -> None:
+        direct_serial = self.transport_combo.currentText() == CAEN_TRANSPORT_DIRECT_SERIAL
+        hardware_selected = self.backend_combo.currentText() == "CAEN USB-VCP"
+        wrapper_controls_enabled = (
+            hardware_selected and not direct_serial and not self.connected_backend and not self.scan_running
+        )
+
+        self.board_number_label.setEnabled(not direct_serial)
+        self.board_number_spin.setEnabled(wrapper_controls_enabled)
+        self.model_label.setEnabled(not direct_serial)
+        self.model_combo.setEnabled(wrapper_controls_enabled)
+        self.current_source_label.setEnabled(not direct_serial)
+        self.current_source_combo.setEnabled(wrapper_controls_enabled)
+        if direct_serial:
+            self.hardware_hint_label.setText(
+                "Direct serial uses COM/baud/data/stop/parity only. Board/LBus is ignored for this "
+                "transport. Model and current source only affect wrapper troubleshooting. Wrapper tuple: "
+                "COM_baud_data_stop_parity_board."
+            )
+        else:
+            self.hardware_hint_label.setText(
+                "Wrapper tuple: COM_baud_data_stop_parity_board. Use wrapper auto, caen-libs, or raw "
+                "wrapper only when comparing against the DLL path. Model/current source apply only to "
+                "wrapper transports."
+            )
 
     def _populate_serial_ports(self) -> None:
         current_text = self.com_combo.currentText()
@@ -643,6 +696,8 @@ class MainWindow(QtWidgets.QMainWindow):
             stop_bits=self.stop_bits_combo.currentText(),
             parity=self.parity_combo.currentText(),
             board_number=int(self.board_number_spin.value()),
+            wrapper_model=str(self.model_combo.currentData()),
+            wrapper_current_source=str(self.current_source_combo.currentData()),
         )
 
     def _set_connection_state(self, connected: bool) -> None:
@@ -655,6 +710,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_ports_button.setEnabled(not connected and not self.scan_running)
         self.transport_combo.setEnabled(not connected and not self.scan_running)
         self.board_number_spin.setEnabled(not connected and not self.scan_running)
+        self.model_combo.setEnabled(not connected and not self.scan_running)
+        self.current_source_combo.setEnabled(not connected and not self.scan_running)
         self.baud_combo.setEnabled(not connected and not self.scan_running)
         self.data_bits_combo.setEnabled(not connected and not self.scan_running)
         self.stop_bits_combo.setEnabled(not connected and not self.scan_running)
@@ -674,12 +731,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_ports_button.setEnabled(not self.connected_backend and not running)
         self.transport_combo.setEnabled(not self.connected_backend and not running)
         self.board_number_spin.setEnabled(not self.connected_backend and not running)
+        self.model_combo.setEnabled(not self.connected_backend and not running)
+        self.current_source_combo.setEnabled(not self.connected_backend and not running)
         self.baud_combo.setEnabled(not self.connected_backend and not running)
         self.data_bits_combo.setEnabled(not self.connected_backend and not running)
         self.stop_bits_combo.setEnabled(not self.connected_backend and not running)
         self.parity_combo.setEnabled(not self.connected_backend and not running)
         self.mode_combo.setEnabled(not running)
         self._set_manual_controls_enabled(self.connected_backend and not running)
+        self._on_transport_selection_changed()
 
     def _set_manual_controls_enabled(self, enabled: bool) -> None:
         for cells in self.channel_cells.values():

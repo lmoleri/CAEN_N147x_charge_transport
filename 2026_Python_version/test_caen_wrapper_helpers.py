@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from caen_interface import CAENWrapperInterface, UsbVcpSettings
+from caen_interface import (
+    CAEN_WRAPPER_CURRENT_SOURCE_IMONL,
+    CAEN_WRAPPER_MODEL_N1470,
+    CAEN_WRAPPER_MODEL_N1471,
+    CAENWrapperInterface,
+    UsbVcpSettings,
+)
 
 
 class CaenWrapperHelperTests(unittest.TestCase):
@@ -27,11 +33,31 @@ class CaenWrapperHelperTests(unittest.TestCase):
 
     def test_parameter_alias_resolution(self) -> None:
         resolved = CAENWrapperInterface.resolve_parameter_names(
-            ["V0Set", "VMon", "IMon", "Pw", "Status", "RUp", "RDW"]
+            ["V0Set", "VMon", "IMon", "Pw", "Status", "RUp", "RDW"],
+            UsbVcpSettings(com_port="COM4", wrapper_model=CAEN_WRAPPER_MODEL_N1470),
         )
         self.assertEqual(resolved["voltage_set"], "V0Set")
         self.assertEqual(resolved["current_monitor"], "IMon")
         self.assertEqual(resolved["power"], "Pw")
+
+    def test_parameter_alias_resolution_prefers_imonl_for_n1471_auto(self) -> None:
+        resolved = CAENWrapperInterface.resolve_parameter_names(
+            ["VSet", "VMon", "IMonH", "IMonL", "Pw", "Status", "RUp", "RDW"],
+            UsbVcpSettings(com_port="COM4", wrapper_model=CAEN_WRAPPER_MODEL_N1471),
+        )
+
+        self.assertEqual(resolved["current_monitor"], "IMonL")
+
+    def test_parameter_alias_resolution_explicit_current_source_must_exist(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "Try Current source = Auto"):
+            CAENWrapperInterface.resolve_parameter_names(
+                ["VSet", "VMon", "IMonH", "Pw", "Status", "RUp", "RDW"],
+                UsbVcpSettings(
+                    com_port="COM4",
+                    wrapper_model=CAEN_WRAPPER_MODEL_N1471,
+                    wrapper_current_source=CAEN_WRAPPER_CURRENT_SOURCE_IMONL,
+                ),
+            )
 
     def test_missing_required_parameter_alias_raises(self) -> None:
         with self.assertRaises(RuntimeError):

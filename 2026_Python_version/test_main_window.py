@@ -7,6 +7,13 @@ from tempfile import TemporaryDirectory
 from PyQt5 import QtWidgets
 
 from caen_interface import (
+    CAEN_TRANSPORT_DIRECT_SERIAL,
+    CAEN_TRANSPORT_OPTIONS,
+    CAEN_WRAPPER_CURRENT_SOURCE_AUTO,
+    CAEN_WRAPPER_CURRENT_SOURCE_OPTIONS,
+    CAEN_WRAPPER_MODEL_LABELS,
+    CAEN_WRAPPER_MODEL_N1471,
+    CAEN_WRAPPER_MODEL_OPTIONS,
     CHANNEL_LABELS,
     CAEN_TRANSPORT_RAW_WRAPPER,
     USB_VCP_BAUD_OPTIONS,
@@ -74,8 +81,17 @@ class MainWindowTabbedShellTests(unittest.TestCase):
         settings = self.window._current_usb_vcp_settings()
 
         self.assertIsInstance(settings, UsbVcpSettings)
-        self.assertEqual(settings.transport, "Auto")
+        self.assertEqual(settings.transport, CAEN_TRANSPORT_DIRECT_SERIAL)
+        self.assertEqual(settings.wrapper_model, CAEN_WRAPPER_MODEL_N1471)
+        self.assertEqual(settings.wrapper_current_source, CAEN_WRAPPER_CURRENT_SOURCE_AUTO)
         self.assertEqual(settings.build_argument(), "COM1_9600_8_1_none_0")
+
+    def test_hardware_transport_options_match_expected_order(self) -> None:
+        self.window.backend_combo.setCurrentText("CAEN USB-VCP")
+
+        values = [self.window.transport_combo.itemText(i) for i in range(self.window.transport_combo.count())]
+
+        self.assertEqual(values, list(CAEN_TRANSPORT_OPTIONS))
 
     def test_hardware_settings_use_logger_baud_whitelist(self) -> None:
         self.window.backend_combo.setCurrentText("CAEN USB-VCP")
@@ -84,6 +100,36 @@ class MainWindowTabbedShellTests(unittest.TestCase):
 
         self.assertEqual(values, list(USB_VCP_BAUD_OPTIONS))
 
+    def test_wrapper_only_controls_are_disabled_for_direct_serial(self) -> None:
+        self.window.backend_combo.setCurrentText("CAEN USB-VCP")
+
+        self.assertFalse(self.window.board_number_spin.isEnabled())
+        self.assertFalse(self.window.model_combo.isEnabled())
+        self.assertFalse(self.window.current_source_combo.isEnabled())
+
+    def test_wrapper_only_controls_enable_for_wrapper_transport(self) -> None:
+        self.window.backend_combo.setCurrentText("CAEN USB-VCP")
+
+        self.window.transport_combo.setCurrentText(CAEN_TRANSPORT_RAW_WRAPPER)
+
+        self.assertTrue(self.window.board_number_spin.isEnabled())
+        self.assertTrue(self.window.model_combo.isEnabled())
+        self.assertTrue(self.window.current_source_combo.isEnabled())
+
+    def test_wrapper_model_options_match_expected_order(self) -> None:
+        self.window.backend_combo.setCurrentText("CAEN USB-VCP")
+
+        values = [self.window.model_combo.itemText(i) for i in range(self.window.model_combo.count())]
+
+        self.assertEqual(values, [CAEN_WRAPPER_MODEL_LABELS[model] for model in CAEN_WRAPPER_MODEL_OPTIONS])
+
+    def test_wrapper_current_source_options_match_expected_order(self) -> None:
+        self.window.backend_combo.setCurrentText("CAEN USB-VCP")
+
+        values = [self.window.current_source_combo.itemText(i) for i in range(self.window.current_source_combo.count())]
+
+        self.assertEqual(values, list(CAEN_WRAPPER_CURRENT_SOURCE_OPTIONS))
+
     def test_hardware_settings_collect_custom_serial_tuple(self) -> None:
         self.window.backend_combo.setCurrentText("CAEN USB-VCP")
         self.window.com_combo.clear()
@@ -91,6 +137,8 @@ class MainWindowTabbedShellTests(unittest.TestCase):
         self.window.com_combo.setCurrentText("9")
         self.window.transport_combo.setCurrentText(CAEN_TRANSPORT_RAW_WRAPPER)
         self.window.board_number_spin.setValue(2)
+        self.window.model_combo.setCurrentIndex(self.window.model_combo.findData("N1470"))
+        self.window.current_source_combo.setCurrentText("IMonH")
         self.window.baud_combo.setCurrentText("57600")
         self.window.data_bits_combo.setCurrentText("7")
         self.window.stop_bits_combo.setCurrentText("2")
@@ -99,6 +147,8 @@ class MainWindowTabbedShellTests(unittest.TestCase):
         settings = self.window._current_usb_vcp_settings()
 
         self.assertEqual(settings.transport, CAEN_TRANSPORT_RAW_WRAPPER)
+        self.assertEqual(settings.wrapper_model, "N1470")
+        self.assertEqual(settings.wrapper_current_source, "IMonH")
         self.assertEqual(settings.build_argument(), "COM9_57600_7_2_even_2")
 
     def test_worker_manual_control_applies_to_simulation_backend(self) -> None:

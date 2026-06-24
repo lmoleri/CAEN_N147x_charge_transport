@@ -1,8 +1,9 @@
-# THGEM Exercise GUI (CAEN N1470 charge transport)
+# THGEM Exercise GUI (CAEN N1471H / N147x charge transport)
 
-A PyQt5 application for the THGEM charge-transport exercise. It drives a **CAEN N1470**
+A PyQt5 application for the THGEM charge-transport exercise. It drives a **CAEN N1471H**
 high-voltage power supply, automates the voltage/field scans, monitors and manually controls all
-four channels, plots current vs THGEM1 voltage live, and logs every point to CSV.
+four channels, plots current vs THGEM1 voltage live, and logs every point to CSV. The wrapper
+troubleshooting path still supports the closely related **N1470** family.
 
 The GUI design (tabbed shell + GECO-style channel grid) is adapted from
 [weizmann-atlas/caen_logger](https://github.com/weizmann-atlas/caen_logger).
@@ -10,17 +11,21 @@ The GUI design (tabbed shell + GECO-style channel grid) is adapted from
 Two backends:
 
 - **Simulation** — works on any OS with no hardware. Use this for teaching/demos.
-- **CAEN USB-VCP** — drives the N1470 over USB through the official **CAEN HV Wrapper** library
-  on the Windows lab PC. The default **Auto** transport tries the `caen-libs` path first and
-  falls back to the raw wrapper DLL path if needed.
+- **CAEN USB-VCP** — drives the N1471H / N1470 family over USB. The default transport is now the
+  legacy **direct serial** path inferred from the older `N1471A` VISA-style LabVIEW stack
+  bundled in this repo. Wrapper transports remain available for comparison:
+  `wrapper auto` (`caen-libs` then raw wrapper), `caen-libs`, and `raw wrapper`.
 
 ## Interface
 
 A single window with three tabs:
 
 - **Setup** — choose the backend (Simulation / CAEN USB-VCP) and COM port, then Connect/Disconnect.
-  For hardware, an advanced section exposes the transport mode (`Auto`, `caen-libs`, `raw wrapper`)
-  plus logger-style USB-VCP tuple fields (baud, data bits, stop bits, parity, board number).
+  For hardware, an advanced section exposes the transport mode (`direct serial`, `wrapper auto`,
+  `caen-libs`, `raw wrapper`) plus logger-style USB serial fields (baud, data bits, stop bits,
+  parity). The wrapper transports additionally expose a **Model** selector
+  (`N1471H / N1471`, `N1470H / N1470`) and **Current source** selector
+  (`Auto`, `IMonL`, `IMonH`, `IMon`). Board/LBus, model, and current source are wrapper-only.
 - **Channels** — a live grid for the four channels (C, T1, B1, T2): VMon, IMon, colour-coded status,
   plus **manual control** — an editable **VSet** (applies on Enter / focus-out), a per-channel
   **Power** toggle, and **All ON / All OFF**. Manual control is disabled while a scan runs.
@@ -69,27 +74,37 @@ This creates a venv, installs dependencies, and runs PyInstaller against
 1. Install the **CAEN HV Wrapper** library on the Windows lab PC (download from
    <https://www.caen.it/products/caen-hv-wrapper-library/>). `caen-libs` loads it automatically —
    no DLL needs to be copied next to the exe.
-2. Connect the N1470 over USB and note its COM port.
+2. Connect the N1471H over USB and note its COM port.
 3. In the *Setup* tab choose backend **CAEN USB-VCP**, select the COM port, leave transport on
-   **Auto**, and **Connect**. The logger-aligned default USB tuple is `COMx_9600_8_1_none_0`.
+   **direct serial**, and **Connect**. The logger-aligned serial defaults are `COMx_9600_8_1_none`.
+   If you need to compare against the CAEN wrapper stack, switch to a wrapper transport and leave
+   **Model = N1471H / N1471** plus **Current source = Auto** unless you are troubleshooting.
 
-> The hardware backend is exercised on the lab PC (it needs the N1470 + the CAEN HV Wrapper).
+> The hardware backend is exercised on the lab PC (it needs the N1471H + the CAEN HV Wrapper).
 > Simulation covers everything else, including CI and development.
 
 ## CAEN troubleshooting
 
-- **N1470H is still treated as `N1470`** by the CAEN HV Wrapper path in this app. The `H` suffix
-  does not currently map to a separate wrapper system type.
-- Install **CAEN HV Wrapper Rel. 5.10 or newer** on the Windows lab PC. N1470 support was added in
-  Rel. 5.10 (December 2012); **6.x is preferred**.
-- If **Auto** fails, force **Transport = caen-libs** and then **Transport = raw wrapper** to compare
-  the two code paths directly.
+- For the actual lab unit, leave **Model = N1471H / N1471** when testing wrapper transports.
+- For **N1471H/N1470-style USB devices**, try **Transport = direct serial** first. This backend is
+  intended to mirror the older VISA-based control path from the legacy LabVIEW software bundled in
+  this repo.
+- Install **CAEN HV Wrapper Rel. 5.10 or newer** on the Windows lab PC. N1470/N1471 USB wrapper
+  support dates back to Rel. 5.10 (December 2012); **6.x is preferred**.
+- If **wrapper auto** fails, force **Transport = caen-libs** and then **Transport = raw wrapper** to
+  compare the two wrapper code paths directly.
 - For N1470/N1471 USB, this app now mirrors `caen_logger`: it sends **no username/password over USB**.
-- Keep the default USB-VCP tuple unless you are matching a known-working legacy setup:
-  `COM_9600_8_1_none_0`.
-- `LOGINFAILED` on USB is usually a COM-port or USB-tuple mismatch, not a username/password problem.
-- Connection failures now include the backend attempted and the exact USB-VCP argument string, which
-  makes it easier to compare this GUI against an older working setup.
+- Keep the default serial settings unless you are matching a known-working legacy setup:
+  `COM_9600_8_1_none` for direct serial, or `COM_9600_8_1_none_0` for wrapper transports.
+- On the wrapper path, **Current source = Auto** prefers `IMonL` for N1471H and `IMon` for N1470.
+  Force `IMonL`, `IMonH`, or `IMon` only when comparing what the CAEN wrapper reports.
+- Repeated USB wrapper failures such as `LOGINFAILED` or CAEN `4100 Connection failed` are a strong
+  cue to switch to **direct serial**, not to add username/password fields.
+- The **raw wrapper** backend still uses the CAEN **N14xx family** system code (`N1470 = 6`) for both
+  N1470 and N1471H. That is expected and is shown explicitly in diagnostics.
+- Wrapper failures continue to include the backend attempted and the exact USB-VCP argument string;
+  direct serial failures include the exact COM/baud/data/stop/parity settings so the two paths are
+  easy to compare.
 
 ## Where measurements are saved
 
