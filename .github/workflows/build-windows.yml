@@ -38,20 +38,6 @@ jobs:
       - name: Build one-folder bundle
         run: pyinstaller --noconfirm THGEM_GUI.spec
 
-      - name: Smoke-test the frozen app (startup + bundled imports)
-        shell: pwsh
-        continue-on-error: true   # observation run; keep the artifact even if startup check fails
-        # Headless QtWebEngine rendering can't run on the GPU-less runner; this checks
-        # that the exe starts and all heavy modules import (caught the QtPrintSupport
-        # gap). Full Plotly render is verified on a real desktop via --selftest.
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: |
-          $exe = Join-Path $PWD "dist\THGEM_GUI\THGEM_GUI.exe"
-          $p = Start-Process -FilePath $exe -ArgumentList "--selfcheck" -Wait -PassThru
-          Write-Host "frozen --selfcheck exit code: $($p.ExitCode)"
-          if ($p.ExitCode -ne 0) { throw "Frozen --selfcheck failed (exit $($p.ExitCode))" }
-
       - name: Zip bundle
         shell: pwsh
         run: Compress-Archive -Path dist/THGEM_GUI -DestinationPath THGEM_GUI-windows.zip -Force
@@ -61,6 +47,20 @@ jobs:
         with:
           name: THGEM_GUI-windows
           path: 2026_Python_version/THGEM_GUI-windows.zip
+
+      - name: Smoke-test the frozen app (startup + bundled imports)
+        shell: pwsh
+        # Confirms the exe starts and the whole bundled stack imports (this caught the
+        # QtPrintSupport gap). Runs after upload so a regression still leaves a
+        # downloadable artifact. Headless QtWebEngine *rendering* can't run on the
+        # GPU-less runner; full Plotly render is verified on a real desktop via --selftest.
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $exe = Join-Path $PWD "dist\THGEM_GUI\THGEM_GUI.exe"
+          $p = Start-Process -FilePath $exe -ArgumentList "--selfcheck" -Wait -PassThru
+          Write-Host "frozen --selfcheck exit code: $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { throw "Frozen --selfcheck failed (exit $($p.ExitCode))" }
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
