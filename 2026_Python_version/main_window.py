@@ -193,17 +193,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_scan_state(False)
 
     def _build_ui(self) -> None:
-        central = QtWidgets.QWidget()
-        self.setCentralWidget(central)
-        root_layout = QtWidgets.QVBoxLayout(central)
-        root_layout.setSpacing(12)
-
-        root_layout.addWidget(self._build_connection_group())
-        root_layout.addWidget(self._build_scan_group())
-        root_layout.addLayout(self._build_monitor_and_plot_layout(), stretch=1)
-        root_layout.addWidget(self._build_log_group(), stretch=0)
-
+        self.tabs = QtWidgets.QTabWidget()
+        self.setCentralWidget(self.tabs)
+        self.tabs.addTab(self._build_setup_tab(), "Setup")
+        self.tabs.addTab(self._build_channels_tab(), "Channels")
+        self.tabs.addTab(self._build_scan_tab(), "Scan")
         self.statusBar().showMessage("Ready.")
+
+    def _build_setup_tab(self) -> QtWidgets.QWidget:
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setSpacing(12)
+        layout.addWidget(self._build_connection_group())
+        layout.addStretch(1)
+        return tab
 
     def _build_connection_group(self) -> QtWidgets.QGroupBox:
         group = QtWidgets.QGroupBox("Connection")
@@ -272,46 +275,51 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setColumnStretch(1, 1)
         return group
 
-    def _build_monitor_and_plot_layout(self) -> QtWidgets.QLayout:
-        layout = QtWidgets.QHBoxLayout()
-        layout.setSpacing(12)
-        layout.addWidget(self._build_monitor_group(), stretch=0)
-        layout.addWidget(self._build_plot_group(), stretch=1)
-        return layout
+    def _build_channels_tab(self) -> QtWidgets.QWidget:
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        hint = QtWidgets.QLabel("Live channel monitor. Voltages are driven by the scan recipe.")
+        hint.setStyleSheet("color: grey; font-style: italic;")
+        layout.addWidget(hint)
 
-    def _build_monitor_group(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("Channel Monitor")
-        layout = QtWidgets.QVBoxLayout(group)
-        layout.setSpacing(10)
+        columns = ["Channel", "Polarity", "VMon [V]", "IMon [nA]", "Power", "Status"]
+        self.channel_table = QtWidgets.QTableWidget(len(CHANNEL_DEFINITIONS), len(columns))
+        self.channel_table.setHorizontalHeaderLabels(columns)
+        self.channel_table.verticalHeader().setVisible(False)
+        self.channel_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.channel_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.channel_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
 
-        self.channel_labels: dict[str, dict[str, QtWidgets.QLabel]] = {}
-        for channel in CHANNEL_DEFINITIONS:
-            card = QtWidgets.QGroupBox(f"{channel.label} ({'negative' if channel.polarity == '-' else 'positive'})")
-            card_layout = QtWidgets.QFormLayout(card)
-            voltage_label = QtWidgets.QLabel("0.0 V")
-            current_label = QtWidgets.QLabel("0.000 nA")
-            power_label = QtWidgets.QLabel("OFF")
-            status_label = QtWidgets.QLabel("N/A")
+        cell_keys = ("channel", "polarity", "voltage", "current", "power", "status")
+        self.channel_cells: dict[str, dict[str, QtWidgets.QTableWidgetItem]] = {}
+        for row, channel in enumerate(CHANNEL_DEFINITIONS):
+            polarity = "negative" if channel.polarity == "-" else "positive"
+            initial = (channel.label, polarity, "0.0", "0.000", "OFF", "N/A")
+            cells: dict[str, QtWidgets.QTableWidgetItem] = {}
+            for col, (key, text) in enumerate(zip(cell_keys, initial)):
+                item = QtWidgets.QTableWidgetItem(text)
+                item.setTextAlignment(QtCore.Qt.AlignCenter)
+                self.channel_table.setItem(row, col, item)
+                cells[key] = item
+            self.channel_cells[channel.label] = cells
 
-            for label in (voltage_label, current_label, power_label, status_label):
-                label.setMinimumWidth(120)
-                label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        layout.addWidget(self.channel_table)
+        return tab
 
-            card_layout.addRow("Voltage", voltage_label)
-            card_layout.addRow("Current", current_label)
-            card_layout.addRow("Power", power_label)
-            card_layout.addRow("Status", status_label)
+    def _build_scan_tab(self) -> QtWidgets.QWidget:
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setSpacing(8)
+        layout.addWidget(self._build_scan_group())
 
-            self.channel_labels[channel.label] = {
-                "voltage": voltage_label,
-                "current": current_label,
-                "power": power_label,
-                "status": status_label,
-            }
-            layout.addWidget(card)
-
-        layout.addStretch(1)
-        return group
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        splitter.addWidget(self._build_plot_group())
+        splitter.addWidget(self._build_log_group())
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        splitter.setSizes([600, 160])
+        layout.addWidget(splitter, stretch=1)
+        return tab
 
     def _build_plot_group(self) -> QtWidgets.QGroupBox:
         group = QtWidgets.QGroupBox("Current vs THGEM1 Voltage")
@@ -403,12 +411,23 @@ class MainWindow(QtWidgets.QMainWindow):
         for snapshot in snapshots:
             if not isinstance(snapshot, ChannelSnapshot):
                 continue
-            labels = self.channel_labels[snapshot.label]
+            cells = self.channel_cells.get(snapshot.label)
+            if cells is None:
+                continue
             signed_voltage = snapshot.vmon_v if snapshot.polarity == "+" else -snapshot.vmon_v
-            labels["voltage"].setText(f"{signed_voltage:+.1f} V")
-            labels["current"].setText(f"{snapshot.imon_na:+.4f} nA")
-            labels["power"].setText("ON" if snapshot.is_on else "OFF")
-            labels["status"].setText(snapshot.status_text)
+            cells["voltage"].setText(f"{signed_voltage:+.1f}")
+            cells["current"].setText(f"{snapshot.imon_na:+.4f}")
+            cells["power"].setText("ON" if snapshot.is_on else "OFF")
+            cells["status"].setText(snapshot.status_text)
+            self._apply_status_color(cells["status"], snapshot)
+
+    def _apply_status_color(self, item: QtWidgets.QTableWidgetItem, snapshot: ChannelSnapshot) -> None:
+        if snapshot.status_code != 0:
+            item.setBackground(QtGui.QColor("#f2dede"))   # alarm
+        elif snapshot.is_on:
+            item.setBackground(QtGui.QColor("#dff0d8"))   # on & ok
+        else:
+            item.setBackground(QtGui.QColor("#eeeeee"))   # off
 
     def _on_scan_prepared(self, field_configs: object, csv_path: str) -> None:
         if isinstance(field_configs, (list, tuple)):
