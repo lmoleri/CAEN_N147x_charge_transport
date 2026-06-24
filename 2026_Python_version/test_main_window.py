@@ -48,6 +48,38 @@ class MainWindowTabbedShellTests(unittest.TestCase):
         self.assertEqual(c_cells["power"].text(), "ON")
         self.assertEqual(self.window.channel_cells["T2"]["power"].text(), "OFF")
 
+    def test_channels_grid_has_manual_controls(self) -> None:
+        for label in CHANNEL_LABELS:
+            cells = self.window.channel_cells[label]
+            self.assertIsInstance(cells["vset"], QtWidgets.QDoubleSpinBox)
+            self.assertIsInstance(cells["power"], QtWidgets.QPushButton)
+            self.assertTrue(cells["power"].isCheckable())
+        self.assertTrue(hasattr(self.window, "all_on_button"))
+        self.assertTrue(hasattr(self.window, "all_off_button"))
+
+    def test_manual_controls_disabled_when_disconnected(self) -> None:
+        self.assertFalse(self.window.channel_cells["C"]["vset"].isEnabled())
+        self.assertFalse(self.window.channel_cells["C"]["power"].isEnabled())
+        self.assertFalse(self.window.all_on_button.isEnabled())
+
+    def test_worker_manual_control_applies_to_simulation_backend(self) -> None:
+        from main_window import ScanWorker
+
+        worker = ScanWorker(Path(self._tmp.name))
+        worker.connect_backend("Simulation", "")
+        self.assertIsNotNone(worker.backend)
+
+        worker.set_channel_voltage("C", 234.0)
+        self.assertAlmostEqual(worker.backend._channel_state["C"]["voltage_v"], 234.0)
+
+        worker.set_channel_power("C", True)
+        self.assertTrue(worker.backend._channel_state["C"]["is_on"])
+
+        worker.set_all_power(False)
+        self.assertTrue(all(not st["is_on"] for st in worker.backend._channel_state.values()))
+
+        worker.backend.disconnect()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -133,6 +133,41 @@ class ScanWorker(QtCore.QObject):
     def request_abort(self) -> None:
         self.abort_event.set()
 
+    @QtCore.pyqtSlot(str, float)
+    def set_channel_voltage(self, label: str, voltage_v: float) -> None:
+        self._apply_manual(
+            lambda: self.backend.set_channel_voltages({label: float(voltage_v)}),
+            f"Set {label} VSet = {voltage_v:.1f} V",
+        )
+
+    @QtCore.pyqtSlot(str, bool)
+    def set_channel_power(self, label: str, on: bool) -> None:
+        self._apply_manual(
+            lambda: (self.backend.power_on_channels if on else self.backend.power_off_channels)([label]),
+            f"{label} powered {'ON' if on else 'OFF'}",
+        )
+
+    @QtCore.pyqtSlot(bool)
+    def set_all_power(self, on: bool) -> None:
+        self._apply_manual(
+            lambda: (self.backend.power_on_channels if on else self.backend.power_off_channels)(list(CHANNEL_LABELS)),
+            f"All channels powered {'ON' if on else 'OFF'}",
+        )
+
+    def _apply_manual(self, action, message: str) -> None:
+        if self.backend is None:
+            self.error.emit("Connect to a backend before manual control.")
+            return
+        if self.scan_active:
+            self.error.emit("Manual control is disabled during a scan.")
+            return
+        try:
+            action()
+            self.log_message.emit(message)
+            self.channel_refresh.emit(self.backend.read_all_channels())
+        except Exception as exc:  # pragma: no cover - hardware-dependent
+            self.error.emit(f"Manual control failed: {exc}")
+
     def _disconnect_backend(self) -> None:
         if self.backend is None:
             return
@@ -150,6 +185,9 @@ class MainWindow(QtWidgets.QMainWindow):
     disconnect_requested = QtCore.pyqtSignal()
     refresh_requested = QtCore.pyqtSignal()
     start_scan_requested = QtCore.pyqtSignal(str)
+    set_voltage_requested = QtCore.pyqtSignal(str, float)
+    set_power_requested = QtCore.pyqtSignal(str, bool)
+    set_all_power_requested = QtCore.pyqtSignal(bool)
 
     def __init__(self, base_dir: Path) -> None:
         super().__init__()
@@ -170,6 +208,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.disconnect_requested.connect(self.worker.disconnect_backend)
         self.refresh_requested.connect(self.worker.refresh_channels)
         self.start_scan_requested.connect(self.worker.start_scan)
+        self.set_voltage_requested.connect(self.worker.set_channel_voltage)
+        self.set_power_requested.connect(self.worker.set_channel_power)
+        self.set_all_power_requested.connect(self.worker.set_all_power)
 
         self.worker.connected.connect(self._on_connected)
         self.worker.disconnected.connect(self._on_disconnected)
@@ -278,11 +319,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_channels_tab(self) -> QtWidgets.QWidget:
         tab = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(tab)
-        hint = QtWidgets.QLabel("Live channel monitor. Voltages are driven by the scan recipe.")
+        hint = QtWidgets.QLabel(
+            "Setpoints apply on Enter / focus-out. Manual control is disabled during a scan."
+        )
         hint.setStyleSheet("color: grey; font-style: italic;")
         layout.addWidget(hint)
 
-        columns = ["Channel", "Polarity", "VMon [V]", "IMon [nA]", "Power", "Status"]
+        columns = ["Channel", "Polarity", "VMon [V]", "IMon [nA]", "VSet [V]", "Power", "Status"]
+        col = {name: i for i, name in enumerate(columns)}
         self.channel_table = QtWidgets.QTableWidget(len(CHANNEL_DEFINITIONS), len(columns))
         self.channel_table.setHorizontalHeaderLabels(columns)
         self.channel_table.verticalHeader().setVisible(False)
@@ -290,20 +334,53 @@ class MainWindow(QtWidgets.QMainWindow):
         self.channel_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
         self.channel_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
 
-        cell_keys = ("channel", "polarity", "voltage", "current", "power", "status")
-        self.channel_cells: dict[str, dict[str, QtWidgets.QTableWidgetItem]] = {}
+        self.channel_cells: dict[str, dict[str, object]] = {}
+        self._last_vset: dict[str, float] = {}
         for row, channel in enumerate(CHANNEL_DEFINITIONS):
+            label = channel.label
             polarity = "negative" if channel.polarity == "-" else "positive"
-            initial = (channel.label, polarity, "0.0", "0.000", "OFF", "N/A")
-            cells: dict[str, QtWidgets.QTableWidgetItem] = {}
-            for col, (key, text) in enumerate(zip(cell_keys, initial)):
+            cells: dict[str, object] = {}
+            for key, column, text in (
+                ("channel", col["Channel"], label),
+                ("polarity", col["Polarity"], polarity),
+                ("voltage", col["VMon [V]"], "0.0"),
+                ("current", col["IMon [nA]"], "0.000"),
+                ("status", col["Status"], "N/A"),
+            ):
                 item = QtWidgets.QTableWidgetItem(text)
                 item.setTextAlignment(QtCore.Qt.AlignCenter)
-                self.channel_table.setItem(row, col, item)
+                self.channel_table.setItem(row, column, item)
                 cells[key] = item
-            self.channel_cells[channel.label] = cells
+
+            spin = QtWidgets.QDoubleSpinBox()
+            spin.setRange(0.0, 1500.0)
+            spin.setDecimals(1)
+            spin.setSuffix(" V")
+            spin.setKeyboardTracking(False)
+            spin.editingFinished.connect(lambda lbl=label: self._on_vset_edited(lbl))
+            self.channel_table.setCellWidget(row, col["VSet [V]"], spin)
+            cells["vset"] = spin
+            self._last_vset[label] = float(spin.value())
+
+            power_btn = QtWidgets.QPushButton("OFF")
+            power_btn.setCheckable(True)
+            power_btn.clicked.connect(lambda checked, lbl=label: self._on_power_clicked(lbl, checked))
+            self.channel_table.setCellWidget(row, col["Power"], power_btn)
+            cells["power"] = power_btn
+
+            self.channel_cells[label] = cells
 
         layout.addWidget(self.channel_table)
+
+        button_row = QtWidgets.QHBoxLayout()
+        button_row.addStretch(1)
+        self.all_on_button = QtWidgets.QPushButton("All ON")
+        self.all_off_button = QtWidgets.QPushButton("All OFF")
+        self.all_on_button.clicked.connect(lambda: self.set_all_power_requested.emit(True))
+        self.all_off_button.clicked.connect(lambda: self.set_all_power_requested.emit(False))
+        button_row.addWidget(self.all_on_button)
+        button_row.addWidget(self.all_off_button)
+        layout.addLayout(button_row)
         return tab
 
     def _build_scan_tab(self) -> QtWidgets.QWidget:
@@ -381,6 +458,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Abort requested...")
         self._append_log("Abort requested.")
 
+    def _on_vset_edited(self, label: str) -> None:
+        value = float(self.channel_cells[label]["vset"].value())
+        if abs(self._last_vset.get(label, 0.0) - value) < 1e-9:
+            return
+        self._last_vset[label] = value
+        self.set_voltage_requested.emit(label, value)
+
+    def _on_power_clicked(self, label: str, checked: bool) -> None:
+        self.set_power_requested.emit(label, checked)
+
     def _on_connected(self, success: bool, message: str, snapshots: object) -> None:
         if not success:
             self._set_connection_state(False)
@@ -417,9 +504,16 @@ class MainWindow(QtWidgets.QMainWindow):
             signed_voltage = snapshot.vmon_v if snapshot.polarity == "+" else -snapshot.vmon_v
             cells["voltage"].setText(f"{signed_voltage:+.1f}")
             cells["current"].setText(f"{snapshot.imon_na:+.4f}")
-            cells["power"].setText("ON" if snapshot.is_on else "OFF")
             cells["status"].setText(snapshot.status_text)
             self._apply_status_color(cells["status"], snapshot)
+            self._sync_power_button(cells["power"], snapshot.is_on)
+
+    def _sync_power_button(self, button: QtWidgets.QPushButton, on: bool) -> None:
+        button.blockSignals(True)
+        button.setChecked(on)
+        button.setText("ON" if on else "OFF")
+        button.setStyleSheet("background:#3a8a3a; color:white;" if on else "")
+        button.blockSignals(False)
 
     def _apply_status_color(self, item: QtWidgets.QTableWidgetItem, snapshot: ChannelSnapshot) -> None:
         if snapshot.status_code != 0:
@@ -482,6 +576,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.com_combo.setEnabled(not connected and not self.scan_running)
         self.refresh_ports_button.setEnabled(not connected and not self.scan_running)
         self.mode_combo.setEnabled(not self.scan_running)
+        self._set_manual_controls_enabled(connected and not self.scan_running)
         self._on_backend_selection_changed()
 
     def _set_scan_state(self, running: bool) -> None:
@@ -494,6 +589,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.com_combo.setEnabled(not self.connected_backend and not running)
         self.refresh_ports_button.setEnabled(not self.connected_backend and not running)
         self.mode_combo.setEnabled(not running)
+        self._set_manual_controls_enabled(self.connected_backend and not running)
+
+    def _set_manual_controls_enabled(self, enabled: bool) -> None:
+        for cells in self.channel_cells.values():
+            cells["vset"].setEnabled(enabled)
+            cells["power"].setEnabled(enabled)
+        self.all_on_button.setEnabled(enabled)
+        self.all_off_button.setEnabled(enabled)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         if self.scan_running:
