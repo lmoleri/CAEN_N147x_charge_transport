@@ -1,3 +1,5 @@
+# The tabbed shell and GECO-style channel grid are adapted from the design of
+# weizmann-atlas/caen_logger.
 from __future__ import annotations
 
 import threading

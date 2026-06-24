@@ -1,13 +1,28 @@
 # THGEM Exercise GUI (CAEN N1470 charge transport)
 
 A PyQt5 application for the THGEM charge-transport exercise. It drives a **CAEN N1470**
-high-voltage power supply, automates the voltage/field scans, monitors all four channels,
-plots current vs THGEM1 voltage in real time, and logs every point to CSV.
+high-voltage power supply, automates the voltage/field scans, monitors and manually controls all
+four channels, plots current vs THGEM1 voltage live, and logs every point to CSV.
+
+The GUI design (tabbed shell + GECO-style channel grid) is adapted from
+[weizmann-atlas/caen_logger](https://github.com/weizmann-atlas/caen_logger).
 
 Two backends:
 
 - **Simulation** — works on any OS with no hardware. Use this for teaching/demos.
-- **CAEN USB-VCP** — Windows only. Talks to the N1470 over USB through `CAENHVWrapper.dll`.
+- **CAEN USB-VCP** — drives the N1470 over USB through the official **CAEN HV Wrapper** library
+  (via the `caen-libs` bindings), on the Windows lab PC.
+
+## Interface
+
+A single window with three tabs:
+
+- **Setup** — choose the backend (Simulation / CAEN USB-VCP) and COM port, then Connect/Disconnect.
+- **Channels** — a live grid for the four channels (C, T1, B1, T2): VMon, IMon, colour-coded status,
+  plus **manual control** — an editable **VSet** (applies on Enter / focus-out), a per-channel
+  **Power** toggle, and **All ON / All OFF**. Manual control is disabled while a scan runs.
+- **Scan** — pick a recipe (Reference / Collection / Transfer field / Drift field), Start/Abort, and
+  watch the live **current vs THGEM1 voltage** plots (Plotly in a Qt WebEngine view) with a run log.
 
 ## Run from source
 
@@ -19,7 +34,8 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Pick **Simulation** in the *Backend* selector, then **Connect** — no hardware needed.
+Pick **Simulation** in the *Setup* tab, then **Connect** — no hardware needed. (Runtime deps:
+PyQt5, PyQtWebEngine, plotly, pyserial, caen-libs.)
 
 ## Get the prebuilt Windows bundle
 
@@ -47,12 +63,14 @@ This creates a venv, installs dependencies, and runs PyInstaller against
 
 ## Using real CAEN hardware
 
-1. Copy **`CAENHVWrapper.dll`** (from CAEN's software package) next to `THGEM_GUI.exe`
-   — or, when running from source, next to `main.py`.
+1. Install the **CAEN HV Wrapper** library on the Windows lab PC (download from
+   <https://www.caen.it/products/caen-hv-wrapper-library/>). `caen-libs` loads it automatically —
+   no DLL needs to be copied next to the exe.
 2. Connect the N1470 over USB and note its COM port.
-3. In the GUI choose backend **CAEN USB-VCP**, select the COM port, and **Connect**.
+3. In the *Setup* tab choose backend **CAEN USB-VCP**, select the COM port, and **Connect**.
 
-The DLL is vendor-licensed, so it is not committed to this repo or bundled into the build.
+> The hardware backend is exercised on the lab PC (it needs the N1470 + the CAEN HV Wrapper).
+> Simulation covers everything else, including CI and development.
 
 ## Where measurements are saved
 

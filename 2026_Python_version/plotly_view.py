@@ -1,6 +1,6 @@
 """Live scan plots rendered with Plotly inside a Qt WebEngine view.
 
-Drop-in replacement for ``plotting.ScanPlotTabs`` — same surface
+It exposes the same surface
 (``reset_tabs`` / ``activate_subscan`` / ``append_record``) so the ``ScanWorker``
 wiring in ``main_window`` is unchanged.
 
@@ -148,7 +148,7 @@ def _finite_or_none(value: float) -> float | None:
 
 
 class PlotlyScanView(QtWidgets.QTabWidget):
-    """Drop-in replacement for ``plotting.ScanPlotTabs`` backed by Plotly."""
+    """Live scan plots backed by Plotly (``reset_tabs`` / ``activate_subscan`` / ``append_record``)."""
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
