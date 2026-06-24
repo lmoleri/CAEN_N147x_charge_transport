@@ -51,6 +51,28 @@ class _StubBackend(BaseCaenInterface):
         return self._connection_name
 
 
+class _RecordingHvDevice:
+    def __init__(self) -> None:
+        self.open_calls: list[tuple[object, object, str, str, str]] = []
+
+    def open(self, system_type, link_type, argument, username, password):
+        self.open_calls.append((system_type, link_type, argument, username, password))
+        raise RuntimeError("boom")
+
+
+class _RecordingRawLibrary:
+    def __init__(self) -> None:
+        self.init_calls: list[tuple[int, int, bytes, bytes, bytes]] = []
+
+    def CAENHV_InitSystem(self, system_type, link_type, argument, username, password, handle_ptr):
+        self.init_calls.append((system_type, link_type, argument.value, username.value, password.value))
+        return 1234
+
+    def CAENHV_GetError(self, handle):
+        del handle
+        return b"LOGINFAILED"
+
+
 class CaenLibsInterfaceTests(unittest.TestCase):
     def test_is_a_backend_and_constructs(self) -> None:
         backend = CaenLibsInterface(com_port="COM3")
@@ -63,6 +85,31 @@ class CaenLibsInterfaceTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             backend.connect()
         self.assertFalse(backend._connected)
+
+    def test_usb_open_uses_empty_credentials_and_logger_style_argument(self) -> None:
+        import builtins
+        import types
+        from unittest import mock
+
+        device = _RecordingHvDevice()
+        fake_hv = types.SimpleNamespace(
+            SystemType=types.SimpleNamespace(N1470="N1470"),
+            LinkType=types.SimpleNamespace(USB_VCP="USB_VCP"),
+            Device=device,
+        )
+        original_import = builtins.__import__
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "caen_libs" and fromlist == ("caenhvwrapper",):
+                return types.SimpleNamespace(caenhvwrapper=fake_hv)
+            return original_import(name, globals, locals, fromlist, level)
+
+        backend = CaenLibsInterface(settings=UsbVcpSettings(com_port="4"))
+        with mock.patch("builtins.__import__", side_effect=fake_import):
+            with self.assertRaisesRegex(RuntimeError, "COM4_9600_8_1_none_0"):
+                backend.connect()
+
+        self.assertEqual(device.open_calls, [("N1470", "USB_VCP", "COM4_9600_8_1_none_0", "", "")])
 
 
 class CaenUsbVcpInterfaceTests(unittest.TestCase):
@@ -127,9 +174,28 @@ class CaenUsbVcpInterfaceTests(unittest.TestCase):
         )
 
         self.assertIn("raw wrapper", message)
-        self.assertIn("COM4_115200_8_0_0_0", message)
+        self.assertIn("COM4_9600_8_1_none_0", message)
         self.assertIn("code 4100", message)
         self.assertIn("LOGINFAILED", message)
+
+    def test_raw_wrapper_uses_empty_credentials_and_logger_style_argument(self) -> None:
+        from unittest import mock
+
+        from caen_interface import CAENWrapperInterface, LINKTYPE_USB_VCP, SYSTEM_TYPE_N1470
+
+        library = _RecordingRawLibrary()
+        backend = CAENWrapperInterface(settings=UsbVcpSettings(com_port="4"))
+
+        with mock.patch("caen_interface.os.name", "nt"):
+            with mock.patch.object(backend, "_load_library", return_value=library):
+                with mock.patch.object(backend, "_configure_library", return_value=None):
+                    with self.assertRaisesRegex(RuntimeError, "COM4_9600_8_1_none_0"):
+                        backend.connect()
+
+        self.assertEqual(
+            library.init_calls,
+            [(SYSTEM_TYPE_N1470, LINKTYPE_USB_VCP, b"COM4_9600_8_1_none_0", b"", b"")],
+        )
 
 
 if __name__ == "__main__":

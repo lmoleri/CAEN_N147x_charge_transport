@@ -7,19 +7,23 @@ from caen_interface import CAENWrapperInterface, UsbVcpSettings
 
 class CaenWrapperHelperTests(unittest.TestCase):
     def test_usb_vcp_argument_format(self) -> None:
-        self.assertEqual(CAENWrapperInterface.build_usb_vcp_argument("COM13"), "COM13_115200_8_0_0_0")
+        self.assertEqual(CAENWrapperInterface.build_usb_vcp_argument("COM13"), "COM13_9600_8_1_none_0")
 
     def test_usb_vcp_argument_format_with_overrides(self) -> None:
         settings = UsbVcpSettings(
-            com_port="COM7",
+            com_port="7",
             transport="raw wrapper",
             baud=9600,
             data_bits=7,
-            stop_bits=2,
-            parity=1,
+            stop_bits="2",
+            parity="Even",
             board_number=3,
         )
-        self.assertEqual(settings.build_argument(), "COM7_9600_7_2_1_3")
+        self.assertEqual(settings.build_argument(), "COM7_9600_7_2_even_3")
+
+    def test_usb_vcp_argument_normalizes_numeric_com_port(self) -> None:
+        settings = UsbVcpSettings(com_port="4")
+        self.assertEqual(settings.build_argument(), "COM4_9600_8_1_none_0")
 
     def test_parameter_alias_resolution(self) -> None:
         resolved = CAENWrapperInterface.resolve_parameter_names(

@@ -6,7 +6,13 @@ from tempfile import TemporaryDirectory
 
 from PyQt5 import QtWidgets
 
-from caen_interface import CHANNEL_LABELS, CAEN_TRANSPORT_RAW_WRAPPER, ChannelSnapshot, UsbVcpSettings
+from caen_interface import (
+    CHANNEL_LABELS,
+    CAEN_TRANSPORT_RAW_WRAPPER,
+    USB_VCP_BAUD_OPTIONS,
+    ChannelSnapshot,
+    UsbVcpSettings,
+)
 from main_window import MainWindow
 
 
@@ -69,24 +75,31 @@ class MainWindowTabbedShellTests(unittest.TestCase):
 
         self.assertIsInstance(settings, UsbVcpSettings)
         self.assertEqual(settings.transport, "Auto")
-        self.assertEqual(settings.build_argument(), "COM1_115200_8_0_0_0")
+        self.assertEqual(settings.build_argument(), "COM1_9600_8_1_none_0")
+
+    def test_hardware_settings_use_logger_baud_whitelist(self) -> None:
+        self.window.backend_combo.setCurrentText("CAEN USB-VCP")
+
+        values = [self.window.baud_combo.itemText(i) for i in range(self.window.baud_combo.count())]
+
+        self.assertEqual(values, list(USB_VCP_BAUD_OPTIONS))
 
     def test_hardware_settings_collect_custom_serial_tuple(self) -> None:
         self.window.backend_combo.setCurrentText("CAEN USB-VCP")
         self.window.com_combo.clear()
-        self.window.com_combo.addItem("COM9")
-        self.window.com_combo.setCurrentText("COM9")
+        self.window.com_combo.addItem("9")
+        self.window.com_combo.setCurrentText("9")
         self.window.transport_combo.setCurrentText(CAEN_TRANSPORT_RAW_WRAPPER)
         self.window.board_number_spin.setValue(2)
-        self.window.baud_spin.setValue(57600)
-        self.window.data_bits_spin.setValue(7)
-        self.window.stop_bits_spin.setValue(2)
-        self.window.parity_spin.setValue(1)
+        self.window.baud_combo.setCurrentText("57600")
+        self.window.data_bits_combo.setCurrentText("7")
+        self.window.stop_bits_combo.setCurrentText("2")
+        self.window.parity_combo.setCurrentText("Even")
 
         settings = self.window._current_usb_vcp_settings()
 
         self.assertEqual(settings.transport, CAEN_TRANSPORT_RAW_WRAPPER)
-        self.assertEqual(settings.build_argument(), "COM9_57600_7_2_1_2")
+        self.assertEqual(settings.build_argument(), "COM9_57600_7_2_even_2")
 
     def test_worker_manual_control_applies_to_simulation_backend(self) -> None:
         from main_window import ScanWorker

@@ -16,10 +16,14 @@ from caen_interface import (
     ChannelSnapshot,
     FieldConfig,
     SimulationInterface,
+    USB_VCP_BAUD_OPTIONS,
     USB_VCP_BAUD,
     USB_VCP_BOARD_NUMBER,
+    USB_VCP_DATA_BITS_OPTIONS,
     USB_VCP_DATA_BITS,
+    USB_VCP_PARITY_OPTIONS,
     USB_VCP_PARITY,
+    USB_VCP_STOP_BITS_OPTIONS,
     USB_VCP_STOP_BITS,
     UsbVcpSettings,
     list_serial_ports,
@@ -293,26 +297,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.board_number_spin.setRange(0, 31)
         self.board_number_spin.setValue(USB_VCP_BOARD_NUMBER)
 
-        self.baud_spin = QtWidgets.QSpinBox()
-        self.baud_spin.setRange(300, 921600)
-        self.baud_spin.setValue(USB_VCP_BAUD)
-        self.baud_spin.setSingleStep(300)
+        self.baud_combo = QtWidgets.QComboBox()
+        self.baud_combo.addItems(list(USB_VCP_BAUD_OPTIONS))
+        self.baud_combo.setCurrentText(str(USB_VCP_BAUD))
 
-        self.data_bits_spin = QtWidgets.QSpinBox()
-        self.data_bits_spin.setRange(5, 8)
-        self.data_bits_spin.setValue(USB_VCP_DATA_BITS)
+        self.data_bits_combo = QtWidgets.QComboBox()
+        self.data_bits_combo.addItems(list(USB_VCP_DATA_BITS_OPTIONS))
+        self.data_bits_combo.setCurrentText(str(USB_VCP_DATA_BITS))
 
-        self.stop_bits_spin = QtWidgets.QSpinBox()
-        self.stop_bits_spin.setRange(0, 2)
-        self.stop_bits_spin.setValue(USB_VCP_STOP_BITS)
+        self.stop_bits_combo = QtWidgets.QComboBox()
+        self.stop_bits_combo.addItems(list(USB_VCP_STOP_BITS_OPTIONS))
+        self.stop_bits_combo.setCurrentText(str(USB_VCP_STOP_BITS))
 
-        self.parity_spin = QtWidgets.QSpinBox()
-        self.parity_spin.setRange(0, 4)
-        self.parity_spin.setValue(USB_VCP_PARITY)
+        self.parity_combo = QtWidgets.QComboBox()
+        self.parity_combo.addItems(list(USB_VCP_PARITY_OPTIONS))
+        self.parity_combo.setCurrentText(str(USB_VCP_PARITY))
 
         self.hardware_hint_label = QtWidgets.QLabel(
-            "USB-VCP tuple: COM_baud_data_stop_parity_board. Keep the defaults unless "
-            "you are matching a known-working legacy setup."
+            "USB-VCP tuple: COM_baud_data_stop_parity_board. Logger-aligned defaults are "
+            "COMx_9600_8_1_none_0."
         )
         self.hardware_hint_label.setWordWrap(True)
 
@@ -321,13 +324,13 @@ class MainWindow(QtWidgets.QMainWindow):
         hardware_layout.addWidget(QtWidgets.QLabel("Board"), 0, 2)
         hardware_layout.addWidget(self.board_number_spin, 0, 3)
         hardware_layout.addWidget(QtWidgets.QLabel("Baud"), 1, 0)
-        hardware_layout.addWidget(self.baud_spin, 1, 1)
+        hardware_layout.addWidget(self.baud_combo, 1, 1)
         hardware_layout.addWidget(QtWidgets.QLabel("Data bits"), 1, 2)
-        hardware_layout.addWidget(self.data_bits_spin, 1, 3)
+        hardware_layout.addWidget(self.data_bits_combo, 1, 3)
         hardware_layout.addWidget(QtWidgets.QLabel("Stop bits"), 2, 0)
-        hardware_layout.addWidget(self.stop_bits_spin, 2, 1)
+        hardware_layout.addWidget(self.stop_bits_combo, 2, 1)
         hardware_layout.addWidget(QtWidgets.QLabel("Parity"), 2, 2)
-        hardware_layout.addWidget(self.parity_spin, 2, 3)
+        hardware_layout.addWidget(self.parity_combo, 2, 3)
         hardware_layout.addWidget(self.hardware_hint_label, 3, 0, 1, 4)
         hardware_layout.setColumnStretch(1, 1)
         hardware_layout.setColumnStretch(3, 1)
@@ -635,10 +638,10 @@ class MainWindow(QtWidgets.QMainWindow):
         return UsbVcpSettings(
             com_port=self.com_combo.currentText().strip(),
             transport=self.transport_combo.currentText(),
-            baud=int(self.baud_spin.value()),
-            data_bits=int(self.data_bits_spin.value()),
-            stop_bits=int(self.stop_bits_spin.value()),
-            parity=int(self.parity_spin.value()),
+            baud=int(self.baud_combo.currentText()),
+            data_bits=int(self.data_bits_combo.currentText()),
+            stop_bits=self.stop_bits_combo.currentText(),
+            parity=self.parity_combo.currentText(),
             board_number=int(self.board_number_spin.value()),
         )
 
@@ -652,10 +655,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_ports_button.setEnabled(not connected and not self.scan_running)
         self.transport_combo.setEnabled(not connected and not self.scan_running)
         self.board_number_spin.setEnabled(not connected and not self.scan_running)
-        self.baud_spin.setEnabled(not connected and not self.scan_running)
-        self.data_bits_spin.setEnabled(not connected and not self.scan_running)
-        self.stop_bits_spin.setEnabled(not connected and not self.scan_running)
-        self.parity_spin.setEnabled(not connected and not self.scan_running)
+        self.baud_combo.setEnabled(not connected and not self.scan_running)
+        self.data_bits_combo.setEnabled(not connected and not self.scan_running)
+        self.stop_bits_combo.setEnabled(not connected and not self.scan_running)
+        self.parity_combo.setEnabled(not connected and not self.scan_running)
         self.mode_combo.setEnabled(not self.scan_running)
         self._set_manual_controls_enabled(connected and not self.scan_running)
         self._on_backend_selection_changed()
@@ -671,10 +674,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_ports_button.setEnabled(not self.connected_backend and not running)
         self.transport_combo.setEnabled(not self.connected_backend and not running)
         self.board_number_spin.setEnabled(not self.connected_backend and not running)
-        self.baud_spin.setEnabled(not self.connected_backend and not running)
-        self.data_bits_spin.setEnabled(not self.connected_backend and not running)
-        self.stop_bits_spin.setEnabled(not self.connected_backend and not running)
-        self.parity_spin.setEnabled(not self.connected_backend and not running)
+        self.baud_combo.setEnabled(not self.connected_backend and not running)
+        self.data_bits_combo.setEnabled(not self.connected_backend and not running)
+        self.stop_bits_combo.setEnabled(not self.connected_backend and not running)
+        self.parity_combo.setEnabled(not self.connected_backend and not running)
         self.mode_combo.setEnabled(not running)
         self._set_manual_controls_enabled(self.connected_backend and not running)
 

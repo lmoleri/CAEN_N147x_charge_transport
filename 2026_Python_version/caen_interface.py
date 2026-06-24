@@ -19,11 +19,16 @@ MAX_PARAM_NAME = 10
 SYSTEM_TYPE_N1470 = 6
 LINKTYPE_USB_VCP = 5
 
-USB_VCP_BAUD = 115200
+USB_VCP_BAUD = 9600
 USB_VCP_DATA_BITS = 8
-USB_VCP_STOP_BITS = 0
-USB_VCP_PARITY = 0
+USB_VCP_STOP_BITS = "1"
+USB_VCP_PARITY = "None"
 USB_VCP_BOARD_NUMBER = 0
+
+USB_VCP_BAUD_OPTIONS = ("300", "600", "1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200")
+USB_VCP_DATA_BITS_OPTIONS = ("5", "6", "7", "8")
+USB_VCP_STOP_BITS_OPTIONS = ("1", "1.5", "2")
+USB_VCP_PARITY_OPTIONS = ("None", "Even", "Odd", "Mark", "Space")
 
 CAEN_TRANSPORT_AUTO = "Auto"
 CAEN_TRANSPORT_LIBS = "caen-libs"
@@ -83,6 +88,13 @@ def _join_sentence_parts(parts: Sequence[str]) -> str:
         if text:
             cleaned.append(text)
     return " ".join(cleaned)
+
+
+def normalize_usb_vcp_com_port(value: str) -> str:
+    port = str(value).strip() or "COM1"
+    if port.isdigit():
+        return f"COM{port}"
+    return port.upper()
 
 
 def format_caen_connection_error(
@@ -160,8 +172,8 @@ class UsbVcpSettings:
     transport: str = CAEN_TRANSPORT_AUTO
     baud: int = USB_VCP_BAUD
     data_bits: int = USB_VCP_DATA_BITS
-    stop_bits: int = USB_VCP_STOP_BITS
-    parity: int = USB_VCP_PARITY
+    stop_bits: str = USB_VCP_STOP_BITS
+    parity: str = USB_VCP_PARITY
     board_number: int = USB_VCP_BOARD_NUMBER
 
     def build_argument(self) -> str:
@@ -173,6 +185,10 @@ class UsbVcpSettings:
             parity=self.parity,
             board_number=self.board_number,
         )
+
+    @property
+    def normalized_com_port(self) -> str:
+        return normalize_usb_vcp_com_port(self.com_port)
 
     def transport_order(self) -> tuple[str, ...]:
         if self.transport == CAEN_TRANSPORT_AUTO:
@@ -512,13 +528,13 @@ class CAENWrapperInterface(BaseCaenInterface):
         *,
         baud: int = USB_VCP_BAUD,
         data_bits: int = USB_VCP_DATA_BITS,
-        stop_bits: int = USB_VCP_STOP_BITS,
-        parity: int = USB_VCP_PARITY,
+        stop_bits: str = USB_VCP_STOP_BITS,
+        parity: str = USB_VCP_PARITY,
         board_number: int = USB_VCP_BOARD_NUMBER,
     ) -> str:
         return (
-            f"{com_port}_{baud}_{data_bits}_"
-            f"{stop_bits}_{parity}_{board_number}"
+            f"{normalize_usb_vcp_com_port(com_port)}_{int(baud)}_{int(data_bits)}_"
+            f"{str(stop_bits)}_{str(parity).lower()}_{int(board_number)}"
         )
 
     @staticmethod
@@ -554,8 +570,8 @@ class CAENWrapperInterface(BaseCaenInterface):
             SYSTEM_TYPE_N1470,
             LINKTYPE_USB_VCP,
             ctypes.c_char_p(argument),
-            ctypes.c_char_p(b"admin"),
-            ctypes.c_char_p(b"admin"),
+            ctypes.c_char_p(b""),
+            ctypes.c_char_p(b""),
             ctypes.byref(handle),
         )
         self._handle = int(handle.value)
@@ -920,7 +936,7 @@ class CaenLibsInterface(BaseCaenInterface):
         argument = self.settings.build_argument()
         try:
             self._device = hv.Device.open(
-                hv.SystemType.N1470, hv.LinkType.USB_VCP, argument, "admin", "admin"
+                hv.SystemType.N1470, hv.LinkType.USB_VCP, argument, "", ""
             )
         except Exception as exc:  # pragma: no cover - hardware-dependent
             self._device = None
