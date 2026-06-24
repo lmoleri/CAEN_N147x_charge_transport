@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from PyQt5 import QtWidgets
 
@@ -32,12 +33,15 @@ class MainWindowTabbedShellTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self._tmp = TemporaryDirectory()
+        self._serial_ports_patcher = mock.patch("main_window.list_serial_ports", return_value=[])
+        self._serial_ports_patcher.start()
         self.window = MainWindow(Path(self._tmp.name))
 
     def tearDown(self) -> None:
         self.window.close()
         self.window.worker_thread.quit()
         self.window.worker_thread.wait(2000)
+        self._serial_ports_patcher.stop()
         self._tmp.cleanup()
 
     def test_three_tabs_in_order(self) -> None:
