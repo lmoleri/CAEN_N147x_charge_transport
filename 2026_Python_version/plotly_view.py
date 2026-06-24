@@ -53,7 +53,7 @@ const traces = LABELS.map((l, i) => ({{
 const layout = {{
    margin: {{l: 62, r: 16, t: 10, b: 48}},
    xaxis: {{title: 'THGEM1 voltage [V]', zeroline: false}},
-   yaxis: {{title: 'Current [nA]', zeroline: false}},
+   yaxis: {{title: 'Current [μA]', zeroline: false}},
    showlegend: true, legend: {{x: 1, y: 1, xanchor: 'right', yanchor: 'top'}}
 }};
 Plotly.newPlot('graph', traces, layout, {{responsive: true, displaylogo: false}});
@@ -183,7 +183,7 @@ class PlotlyScanView(QtWidgets.QTabWidget):
             return
         snapshots = record.channel_snapshots()
         ys = [
-            _finite_or_none(snapshots[label].imon_na) if label in snapshots else None
+            _finite_or_none(snapshots[label].imon_ua) if label in snapshots else None
             for label in CHANNEL_LABELS
         ]
         page.add_row(_finite_or_none(record.v_thgem1_v), ys)

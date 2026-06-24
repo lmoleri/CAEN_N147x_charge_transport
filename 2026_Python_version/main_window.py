@@ -19,6 +19,7 @@ from caen_interface import (
     CHANNEL_LABELS,
     BaseCaenInterface,
     CaenUsbVcpInterface,
+    ChannelControlState,
     ChannelSnapshot,
     FieldConfig,
     SimulationInterface,
@@ -33,6 +34,7 @@ from caen_interface import (
     USB_VCP_STOP_BITS,
     UsbVcpSettings,
     list_serial_ports,
+    status_color_hex,
 )
 from data_logger import DataLogger
 from plotly_view import PlotlyScanView
@@ -40,14 +42,16 @@ from scan_controller import ScanCallbacks, ScanController
 
 
 class ScanWorker(QtCore.QObject):
-    connected = QtCore.pyqtSignal(bool, str, object)
+    connected = QtCore.pyqtSignal(bool, str, object, object)
     disconnected = QtCore.pyqtSignal(str)
     channel_refresh = QtCore.pyqtSignal(object)
+    control_refresh = QtCore.pyqtSignal(object)
     scan_prepared = QtCore.pyqtSignal(object, str)
     subscan_started = QtCore.pyqtSignal(str)
     point_recorded = QtCore.pyqtSignal(object)
     scan_finished = QtCore.pyqtSignal(bool, bool, str, object)
     error = QtCore.pyqtSignal(str)
+    channel_status = QtCore.pyqtSignal(str)
     log_message = QtCore.pyqtSignal(str)
 
     def __init__(self, base_dir: Path) -> None:
@@ -84,11 +88,12 @@ class ScanWorker(QtCore.QObject):
             self.backend = backend
             self.backend_name = backend.connection_name()
             snapshots = backend.read_all_channels()
-            self.connected.emit(True, f"Connected to {backend.connection_name()}.", snapshots)
+            controls = backend.read_channel_controls()
+            self.connected.emit(True, f"Connected to {backend.connection_name()}.", snapshots, controls)
         except Exception as exc:  # pragma: no cover - hardware-dependent
             self.backend = None
             self.backend_name = ""
-            self.connected.emit(False, str(exc), [])
+            self.connected.emit(False, str(exc), [], [])
 
     @QtCore.pyqtSlot()
     def disconnect_backend(self) -> None:
@@ -109,6 +114,17 @@ class ScanWorker(QtCore.QObject):
 
         try:
             self.channel_refresh.emit(self.backend.read_all_channels())
+        except Exception as exc:  # pragma: no cover - hardware-dependent
+            self.error.emit(str(exc))
+
+    @QtCore.pyqtSlot()
+    def refresh_channel_controls(self) -> None:
+        if self.scan_active or self.backend is None:
+            return
+
+        try:
+            self.control_refresh.emit(self.backend.read_channel_controls())
+            self.channel_status.emit("Setpoints refreshed.")
         except Exception as exc:  # pragma: no cover - hardware-dependent
             self.error.emit(str(exc))
 
@@ -159,6 +175,23 @@ class ScanWorker(QtCore.QObject):
         self._apply_manual(
             lambda: self.backend.set_channel_voltages({label: float(voltage_v)}),
             f"Set {label} VSet = {voltage_v:.1f} V",
+            refresh_controls=True,
+        )
+
+    @QtCore.pyqtSlot(str, float)
+    def set_channel_ramp_up(self, label: str, ramp_up_v_s: float) -> None:
+        self._apply_manual(
+            lambda: self.backend.set_channel_ramp_up_rates({label: float(ramp_up_v_s)}),
+            f"Set {label} RUp = {ramp_up_v_s:.1f} V/s",
+            refresh_controls=True,
+        )
+
+    @QtCore.pyqtSlot(str, float)
+    def set_channel_ramp_down(self, label: str, ramp_down_v_s: float) -> None:
+        self._apply_manual(
+            lambda: self.backend.set_channel_ramp_down_rates({label: float(ramp_down_v_s)}),
+            f"Set {label} RDW = {ramp_down_v_s:.1f} V/s",
+            refresh_controls=True,
         )
 
     @QtCore.pyqtSlot(str, bool)
@@ -175,7 +208,7 @@ class ScanWorker(QtCore.QObject):
             f"All channels powered {'ON' if on else 'OFF'}",
         )
 
-    def _apply_manual(self, action, message: str) -> None:
+    def _apply_manual(self, action, message: str, *, refresh_controls: bool = False) -> None:
         if self.backend is None:
             self.error.emit("Connect to a backend before manual control.")
             return
@@ -185,9 +218,14 @@ class ScanWorker(QtCore.QObject):
         try:
             action()
             self.log_message.emit(message)
+            self.channel_status.emit(message)
             self.channel_refresh.emit(self.backend.read_all_channels())
+            if refresh_controls:
+                self.control_refresh.emit(self.backend.read_channel_controls())
         except Exception as exc:  # pragma: no cover - hardware-dependent
-            self.error.emit(f"Manual control failed: {exc}")
+            detail = f"FAILED: {message} — {exc}"
+            self.channel_status.emit(detail)
+            self.error.emit(f"Manual control failed: {message} — {exc}")
 
     def _disconnect_backend(self) -> None:
         if self.backend is None:
@@ -205,8 +243,11 @@ class MainWindow(QtWidgets.QMainWindow):
     connect_requested = QtCore.pyqtSignal(str, object)
     disconnect_requested = QtCore.pyqtSignal()
     refresh_requested = QtCore.pyqtSignal()
+    refresh_controls_requested = QtCore.pyqtSignal()
     start_scan_requested = QtCore.pyqtSignal(str)
     set_voltage_requested = QtCore.pyqtSignal(str, float)
+    set_ramp_up_requested = QtCore.pyqtSignal(str, float)
+    set_ramp_down_requested = QtCore.pyqtSignal(str, float)
     set_power_requested = QtCore.pyqtSignal(str, bool)
     set_all_power_requested = QtCore.pyqtSignal(bool)
 
@@ -228,19 +269,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connect_requested.connect(self.worker.connect_backend)
         self.disconnect_requested.connect(self.worker.disconnect_backend)
         self.refresh_requested.connect(self.worker.refresh_channels)
+        self.refresh_controls_requested.connect(self.worker.refresh_channel_controls)
         self.start_scan_requested.connect(self.worker.start_scan)
         self.set_voltage_requested.connect(self.worker.set_channel_voltage)
+        self.set_ramp_up_requested.connect(self.worker.set_channel_ramp_up)
+        self.set_ramp_down_requested.connect(self.worker.set_channel_ramp_down)
         self.set_power_requested.connect(self.worker.set_channel_power)
         self.set_all_power_requested.connect(self.worker.set_all_power)
 
         self.worker.connected.connect(self._on_connected)
         self.worker.disconnected.connect(self._on_disconnected)
         self.worker.channel_refresh.connect(self._on_channel_refresh)
+        self.worker.control_refresh.connect(self._on_control_refresh)
         self.worker.scan_prepared.connect(self._on_scan_prepared)
         self.worker.subscan_started.connect(self._on_subscan_started)
         self.worker.point_recorded.connect(self._on_point_recorded)
         self.worker.scan_finished.connect(self._on_scan_finished)
         self.worker.error.connect(self._on_error)
+        self.worker.channel_status.connect(self._set_channels_status)
         self.worker.log_message.connect(self._append_log)
 
         self.poll_timer = QtCore.QTimer(self)
@@ -410,12 +456,12 @@ class MainWindow(QtWidgets.QMainWindow):
         tab = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(tab)
         hint = QtWidgets.QLabel(
-            "Setpoints apply on Enter / focus-out. Manual control is disabled during a scan."
+            "Setpoints apply as you type (Enter or click away). Manual control is disabled during a scan."
         )
         hint.setStyleSheet("color: grey; font-style: italic;")
         layout.addWidget(hint)
 
-        columns = ["Channel", "Polarity", "VMon [V]", "IMon [nA]", "VSet [V]", "Power", "Status"]
+        columns = ["Channel", "Polarity", "Pw", "VSet [V]", "VMon [V]", "IMon [μA]", "RUp [V/s]", "RDW [V/s]", "Status"]
         col = {name: i for i, name in enumerate(columns)}
         self.channel_table = QtWidgets.QTableWidget(len(CHANNEL_DEFINITIONS), len(columns))
         self.channel_table.setHorizontalHeaderLabels(columns)
@@ -426,6 +472,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.channel_cells: dict[str, dict[str, object]] = {}
         self._last_vset: dict[str, float] = {}
+        self._last_ramp_up: dict[str, float] = {}
+        self._last_ramp_down: dict[str, float] = {}
         for row, channel in enumerate(CHANNEL_DEFINITIONS):
             label = channel.label
             polarity = "negative" if channel.polarity == "-" else "positive"
@@ -434,13 +482,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 ("channel", col["Channel"], label),
                 ("polarity", col["Polarity"], polarity),
                 ("voltage", col["VMon [V]"], "0.0"),
-                ("current", col["IMon [nA]"], "0.000"),
+                ("current", col["IMon [μA]"], "0.0000"),
                 ("status", col["Status"], "N/A"),
             ):
                 item = QtWidgets.QTableWidgetItem(text)
                 item.setTextAlignment(QtCore.Qt.AlignCenter)
                 self.channel_table.setItem(row, column, item)
                 cells[key] = item
+
+            power_btn = QtWidgets.QPushButton("OFF")
+            power_btn.setCheckable(True)
+            power_btn.clicked.connect(lambda checked, lbl=label: self._on_power_clicked(lbl, checked))
+            self.channel_table.setCellWidget(row, col["Pw"], power_btn)
+            cells["power"] = power_btn
 
             spin = QtWidgets.QDoubleSpinBox()
             spin.setRange(0.0, 1500.0)
@@ -452,24 +506,47 @@ class MainWindow(QtWidgets.QMainWindow):
             cells["vset"] = spin
             self._last_vset[label] = float(spin.value())
 
-            power_btn = QtWidgets.QPushButton("OFF")
-            power_btn.setCheckable(True)
-            power_btn.clicked.connect(lambda checked, lbl=label: self._on_power_clicked(lbl, checked))
-            self.channel_table.setCellWidget(row, col["Power"], power_btn)
-            cells["power"] = power_btn
+            rup_spin = QtWidgets.QDoubleSpinBox()
+            rup_spin.setRange(0.0, 500.0)
+            rup_spin.setDecimals(1)
+            rup_spin.setSuffix(" V/s")
+            rup_spin.setKeyboardTracking(False)
+            rup_spin.editingFinished.connect(lambda lbl=label: self._on_ramp_up_edited(lbl))
+            self.channel_table.setCellWidget(row, col["RUp [V/s]"], rup_spin)
+            cells["ramp_up"] = rup_spin
+            self._last_ramp_up[label] = float(rup_spin.value())
+
+            rdw_spin = QtWidgets.QDoubleSpinBox()
+            rdw_spin.setRange(0.0, 500.0)
+            rdw_spin.setDecimals(1)
+            rdw_spin.setSuffix(" V/s")
+            rdw_spin.setKeyboardTracking(False)
+            rdw_spin.editingFinished.connect(lambda lbl=label: self._on_ramp_down_edited(lbl))
+            self.channel_table.setCellWidget(row, col["RDW [V/s]"], rdw_spin)
+            cells["ramp_down"] = rdw_spin
+            self._last_ramp_down[label] = float(rdw_spin.value())
 
             self.channel_cells[label] = cells
 
         layout.addWidget(self.channel_table)
 
         button_row = QtWidgets.QHBoxLayout()
+        self.channels_hint_label = QtWidgets.QLabel("Writes are applied immediately when editing finishes.")
+        self.channels_hint_label.setStyleSheet("color: grey; font-style: italic;")
+        button_row.addWidget(self.channels_hint_label)
         button_row.addStretch(1)
         self.all_on_button = QtWidgets.QPushButton("All ON")
         self.all_off_button = QtWidgets.QPushButton("All OFF")
+        self.refresh_setpoints_button = QtWidgets.QPushButton("Refresh Setpoints")
         self.all_on_button.clicked.connect(lambda: self.set_all_power_requested.emit(True))
         self.all_off_button.clicked.connect(lambda: self.set_all_power_requested.emit(False))
+        self.refresh_setpoints_button.clicked.connect(self._queue_refresh_controls)
         button_row.addWidget(self.all_on_button)
         button_row.addWidget(self.all_off_button)
+        button_row.addWidget(self.refresh_setpoints_button)
+        self.channels_status_label = QtWidgets.QLabel("")
+        self.channels_status_label.setStyleSheet("color: #555;")
+        button_row.addWidget(self.channels_status_label)
         layout.addLayout(button_row)
         return tab
 
@@ -568,6 +645,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.connected_backend and not self.scan_running:
             self.refresh_requested.emit()
 
+    def _queue_refresh_controls(self) -> None:
+        if self.connected_backend and not self.scan_running:
+            self.refresh_controls_requested.emit()
+
     def _queue_start_scan(self) -> None:
         self.start_scan_requested.emit(self.mode_combo.currentText())
 
@@ -585,10 +666,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_vset[label] = value
         self.set_voltage_requested.emit(label, value)
 
+    def _on_ramp_up_edited(self, label: str) -> None:
+        value = float(self.channel_cells[label]["ramp_up"].value())
+        if abs(self._last_ramp_up.get(label, 0.0) - value) < 1e-9:
+            return
+        self._last_ramp_up[label] = value
+        self.set_ramp_up_requested.emit(label, value)
+
+    def _on_ramp_down_edited(self, label: str) -> None:
+        value = float(self.channel_cells[label]["ramp_down"].value())
+        if abs(self._last_ramp_down.get(label, 0.0) - value) < 1e-9:
+            return
+        self._last_ramp_down[label] = value
+        self.set_ramp_down_requested.emit(label, value)
+
     def _on_power_clicked(self, label: str, checked: bool) -> None:
         self.set_power_requested.emit(label, checked)
 
-    def _on_connected(self, success: bool, message: str, snapshots: object) -> None:
+    def _on_connected(self, success: bool, message: str, snapshots: object, controls: object) -> None:
         if not success:
             self._set_connection_state(False)
             self.statusBar().showMessage(message, 6000)
@@ -601,6 +696,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._append_log(message)
         self.statusBar().showMessage(message, 4000)
         self._on_channel_refresh(snapshots)
+        self._on_control_refresh(controls)
+        self._set_channels_status("Connected.")
         self.poll_timer.start()
 
     def _on_disconnected(self, message: str) -> None:
@@ -610,6 +707,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_connection_state(False)
         self._set_scan_state(False)
         self._append_log(message)
+        self._set_channels_status(message)
         self.statusBar().showMessage(message, 4000)
 
     def _on_channel_refresh(self, snapshots: object) -> None:
@@ -623,10 +721,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 continue
             signed_voltage = snapshot.vmon_v if snapshot.polarity == "+" else -snapshot.vmon_v
             cells["voltage"].setText(f"{signed_voltage:+.1f}")
-            cells["current"].setText(f"{snapshot.imon_na:+.4f}")
+            cells["current"].setText(f"{snapshot.imon_ua:+.4f}")
             cells["status"].setText(snapshot.status_text)
             self._apply_status_color(cells["status"], snapshot)
             self._sync_power_button(cells["power"], snapshot.is_on)
+
+    def _on_control_refresh(self, controls: object) -> None:
+        if not isinstance(controls, (list, tuple)):
+            return
+        for control in controls:
+            if not isinstance(control, ChannelControlState):
+                continue
+            cells = self.channel_cells.get(control.label)
+            if cells is None:
+                continue
+            for key, last_map, value in (
+                ("vset", self._last_vset, float(control.vset_v)),
+                ("ramp_up", self._last_ramp_up, float(control.ramp_up_v_s)),
+                ("ramp_down", self._last_ramp_down, float(control.ramp_down_v_s)),
+            ):
+                spin = cells[key]
+                spin.blockSignals(True)
+                spin.setValue(value)
+                spin.blockSignals(False)
+                last_map[control.label] = value
 
     def _sync_power_button(self, button: QtWidgets.QPushButton, on: bool) -> None:
         button.blockSignals(True)
@@ -636,12 +754,10 @@ class MainWindow(QtWidgets.QMainWindow):
         button.blockSignals(False)
 
     def _apply_status_color(self, item: QtWidgets.QTableWidgetItem, snapshot: ChannelSnapshot) -> None:
-        if snapshot.status_code != 0:
-            item.setBackground(QtGui.QColor("#f2dede"))   # alarm
-        elif snapshot.is_on:
-            item.setBackground(QtGui.QColor("#dff0d8"))   # on & ok
-        else:
-            item.setBackground(QtGui.QColor("#eeeeee"))   # off
+        item.setBackground(QtGui.QColor(status_color_hex(snapshot.status_code, snapshot.is_on)))
+
+    def _set_channels_status(self, message: str) -> None:
+        self.channels_status_label.setText(message)
 
     def _on_scan_prepared(self, field_configs: object, csv_path: str) -> None:
         if isinstance(field_configs, (list, tuple)):
@@ -745,8 +861,11 @@ class MainWindow(QtWidgets.QMainWindow):
         for cells in self.channel_cells.values():
             cells["vset"].setEnabled(enabled)
             cells["power"].setEnabled(enabled)
+            cells["ramp_up"].setEnabled(enabled)
+            cells["ramp_down"].setEnabled(enabled)
         self.all_on_button.setEnabled(enabled)
         self.all_off_button.setEnabled(enabled)
+        self.refresh_setpoints_button.setEnabled(enabled)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         if self.scan_running:

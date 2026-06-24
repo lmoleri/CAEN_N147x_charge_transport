@@ -26,11 +26,15 @@ A single window with three tabs:
   parity). The wrapper transports additionally expose a **Model** selector
   (`N1471H / N1471`, `N1470H / N1470`) and **Current source** selector
   (`Auto`, `IMonL`, `IMonH`, `IMon`). Board/LBus, model, and current source are wrapper-only.
-- **Channels** — a live grid for the four channels (C, T1, B1, T2): VMon, IMon, colour-coded status,
-  plus **manual control** — an editable **VSet** (applies on Enter / focus-out), a per-channel
-  **Power** toggle, and **All ON / All OFF**. Manual control is disabled while a scan runs.
+- **Channels** — a fixed GECO-style live grid for the four THGEM channels (C, T1, B1, T2) with
+  `Pw`, editable `VSet`, live `VMon`, live `IMon`, editable `RUp`, editable `RDW`, and decoded
+  status text. `VSet`, `RUp`, and `RDW` apply on Enter / focus-out, `Pw` remains a per-channel
+  toggle, and `All ON`, `All OFF`, plus `Refresh Setpoints` reseed the editable boxes from the
+  hardware. A footer on this tab shows the latest manual action or failure. Manual control is
+  disabled while a scan runs.
 - **Scan** — pick a recipe (Reference / Collection / Transfer field / Drift field), Start/Abort, and
-  watch the live **current vs THGEM1 voltage** plots (Plotly in a Qt WebEngine view) with a run log.
+  watch the live **current vs THGEM1 voltage** plots (Plotly in a Qt WebEngine view, in `μA`) with
+  a run log.
 
 ## Run from source
 
@@ -105,6 +109,9 @@ This creates a venv, installs dependencies, and runs PyInstaller against
 - Wrapper failures continue to include the backend attempted and the exact USB-VCP argument string;
   direct serial failures include the exact COM/baud/data/stop/parity settings so the two paths are
   easy to compare.
+- Channel status is decoded into readable labels such as `ON`, `Ramp↑`, `OVC`, and `TRIP` rather than
+  shown only as raw alarm codes.
+- `IMon` is displayed and recorded in **μA** throughout the app and CSV output.
 
 ## Where measurements are saved
 

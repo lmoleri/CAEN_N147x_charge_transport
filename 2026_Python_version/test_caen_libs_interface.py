@@ -12,9 +12,11 @@ from caen_interface import (
     CAEN_WRAPPER_MODEL_N1470,
     CAEN_WRAPPER_MODEL_N1471,
     BaseCaenInterface,
+    ChannelControlState,
     CaenDirectSerialInterface,
     CaenLibsInterface,
     CaenUsbVcpInterface,
+    SimulationInterface,
     UsbVcpSettings,
     format_caen_connection_error,
     format_direct_serial_error,
@@ -39,8 +41,17 @@ class _StubBackend(BaseCaenInterface):
     def read_all_channels(self) -> list:
         return []
 
+    def read_channel_controls(self) -> list:
+        return []
+
     def set_ramp_rates(self, ramp_up_v_s: float, ramp_down_v_s: float) -> None:
         del ramp_up_v_s, ramp_down_v_s
+
+    def set_channel_ramp_up_rates(self, ramp_up_by_label) -> None:
+        del ramp_up_by_label
+
+    def set_channel_ramp_down_rates(self, ramp_down_by_label) -> None:
+        del ramp_down_by_label
 
     def set_channel_voltages(self, voltages_by_label) -> None:
         del voltages_by_label
@@ -200,6 +211,30 @@ class CaenLibsInterfaceTests(unittest.TestCase):
                 backend.connect()
 
         self.assertEqual(device.open_calls, [])
+
+    def test_caen_libs_control_readback_returns_vset_and_ramps(self) -> None:
+        backend = CaenLibsInterface(settings=UsbVcpSettings(com_port="COM4"))
+        backend._connected = True
+        backend._device = object()
+        backend._slot = 0
+        backend._channel_indices = lambda: [0, 1, 2, 3]
+        backend._get_floats = lambda key, channels: {
+            "voltage_set": [120.0, 220.0, 320.0, 420.0],
+            "ramp_up": [10.0, 20.0, 30.0, 40.0],
+            "ramp_down": [11.0, 21.0, 31.0, 41.0],
+        }[key]
+
+        controls = backend.read_channel_controls()
+
+        self.assertEqual(
+            controls,
+            [
+                ChannelControlState("C", 0, 120.0, 10.0, 11.0),
+                ChannelControlState("T1", 1, 220.0, 20.0, 21.0),
+                ChannelControlState("B1", 2, 320.0, 30.0, 31.0),
+                ChannelControlState("T2", 3, 420.0, 40.0, 41.0),
+            ],
+        )
 
 
 class CaenUsbVcpInterfaceTests(unittest.TestCase):
@@ -371,11 +406,47 @@ class CaenDirectSerialInterfaceTests(unittest.TestCase):
 
         self.assertEqual([snapshot.label for snapshot in snapshots], ["C", "T1", "B1", "T2"])
         self.assertEqual(snapshots[0].vmon_v, 100.0)
-        self.assertEqual(snapshots[0].imon_na, -0.5)
+        self.assertEqual(snapshots[0].imon_ua, -0.5)
         self.assertTrue(snapshots[0].is_on)
         self.assertEqual(snapshots[0].status_code, 1)
-        self.assertEqual(snapshots[2].imon_na, 0.75)
+        self.assertEqual(snapshots[0].status_text, "ON")
+        self.assertEqual(snapshots[2].imon_ua, 0.75)
         self.assertTrue(snapshots[2].is_on)
+        self.assertEqual(snapshots[2].status_text, "ON Ramp↑")
+
+    def test_direct_serial_control_readback_reads_vset_and_ramps(self) -> None:
+        responses = {
+            "$BD:0,CMD:MON,PAR:BDNCH\r": "#BD:0,CMD:OK,VAL:4\r",
+            "$BD:0,CMD:MON,CH:0,PAR:VSET\r": "#BD:0,CMD:OK,VAL:150.0\r",
+            "$BD:0,CMD:MON,CH:0,PAR:RUP\r": "#BD:0,CMD:OK,VAL:10.0\r",
+            "$BD:0,CMD:MON,CH:0,PAR:RDW\r": "#BD:0,CMD:OK,VAL:11.0\r",
+            "$BD:0,CMD:MON,CH:1,PAR:VSET\r": "#BD:0,CMD:OK,VAL:250.0\r",
+            "$BD:0,CMD:MON,CH:1,PAR:RUP\r": "#BD:0,CMD:OK,VAL:20.0\r",
+            "$BD:0,CMD:MON,CH:1,PAR:RDW\r": "#BD:0,CMD:OK,VAL:21.0\r",
+            "$BD:0,CMD:MON,CH:2,PAR:VSET\r": "#BD:0,CMD:OK,VAL:350.0\r",
+            "$BD:0,CMD:MON,CH:2,PAR:RUP\r": "#BD:0,CMD:OK,VAL:30.0\r",
+            "$BD:0,CMD:MON,CH:2,PAR:RDW\r": "#BD:0,CMD:OK,VAL:31.0\r",
+            "$BD:0,CMD:MON,CH:3,PAR:VSET\r": "#BD:0,CMD:OK,VAL:450.0\r",
+            "$BD:0,CMD:MON,CH:3,PAR:RUP\r": "#BD:0,CMD:OK,VAL:40.0\r",
+            "$BD:0,CMD:MON,CH:3,PAR:RDW\r": "#BD:0,CMD:OK,VAL:41.0\r",
+        }
+        backend = CaenDirectSerialInterface(
+            settings=UsbVcpSettings(com_port="COM4"),
+            serial_factory=_FakeSerialFactory(responses),
+        )
+
+        backend.connect()
+        controls = backend.read_channel_controls()
+
+        self.assertEqual(
+            controls,
+            [
+                ChannelControlState("C", 0, 150.0, 10.0, 11.0),
+                ChannelControlState("T1", 1, 250.0, 20.0, 21.0),
+                ChannelControlState("B1", 2, 350.0, 30.0, 31.0),
+                ChannelControlState("T2", 3, 450.0, 40.0, 41.0),
+            ],
+        )
 
     def test_direct_serial_setters_emit_expected_commands(self) -> None:
         responses = {
@@ -407,6 +478,22 @@ class CaenDirectSerialInterfaceTests(unittest.TestCase):
         self.assertIn("$BD:0,CMD:SET,CH:0,PAR:ON\r", factory.instance.write_history)
         self.assertIn("$BD:0,CMD:SET,CH:3,PAR:OFF\r", factory.instance.write_history)
 
+    def test_direct_serial_manual_ramp_writes_emit_single_channel_commands(self) -> None:
+        responses = {
+            "$BD:0,CMD:MON,PAR:BDNCH\r": "#BD:0,CMD:OK,VAL:4\r",
+            "$BD:0,CMD:SET,CH:1,PAR:RUP,VAL:12.5\r": "#BD:0,CMD:OK\r",
+            "$BD:0,CMD:SET,CH:3,PAR:RDW,VAL:7.5\r": "#BD:0,CMD:OK\r",
+        }
+        factory = _FakeSerialFactory(responses)
+        backend = CaenDirectSerialInterface(settings=UsbVcpSettings(com_port="COM4"), serial_factory=factory)
+
+        backend.connect()
+        backend.set_channel_ramp_up_rates({"T1": 12.5})
+        backend.set_channel_ramp_down_rates({"T2": 7.5})
+
+        self.assertIn("$BD:0,CMD:SET,CH:1,PAR:RUP,VAL:12.5\r", factory.instance.write_history)
+        self.assertIn("$BD:0,CMD:SET,CH:3,PAR:RDW,VAL:7.5\r", factory.instance.write_history)
+
     def test_direct_serial_connection_error_includes_backend_and_settings(self) -> None:
         backend = CaenDirectSerialInterface(
             settings=UsbVcpSettings(com_port="4"),
@@ -432,6 +519,19 @@ class CaenDirectSerialInterfaceTests(unittest.TestCase):
         self.assertIn("COM4", message)
         self.assertIn("baud=9600", message)
         self.assertIn("Access denied", message)
+
+
+class SimulationInterfaceControlTests(unittest.TestCase):
+    def test_simulation_control_readback_and_per_channel_ramp_writes(self) -> None:
+        backend = SimulationInterface(seed=3)
+        backend.connect()
+
+        backend.set_channel_ramp_up_rates({"C": 12.0})
+        backend.set_channel_ramp_down_rates({"C": 8.0})
+        controls = backend.read_channel_controls()
+
+        self.assertEqual(controls[0], ChannelControlState("C", 0, 1.0, 12.0, 8.0))
+        self.assertTrue(all(isinstance(control, ChannelControlState) for control in controls))
 
 
 if __name__ == "__main__":

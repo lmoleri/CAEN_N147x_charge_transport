@@ -237,8 +237,65 @@ def format_direct_serial_error(
     return _join_sentence_parts(parts)
 
 
-def format_status_text(status_code: int) -> str:
-    return "OK" if status_code == 0 else f"ALARM (0x{status_code:X})"
+CH_STATUS_BITS = [
+    (0, "ON"),
+    (1, "Ramp↑"),
+    (2, "Ramp↓"),
+    (3, "OVC"),
+    (4, "OVV"),
+    (5, "UNV"),
+    (6, "MAXV"),
+    (7, "TRIP"),
+    (8, "OVP"),
+    (9, "OVT"),
+    (10, "DIS"),
+    (11, "KILL"),
+    (12, "ILK"),
+    (13, "NOCAL"),
+]
+STATUS_ALARM_BITS = {3, 4, 5, 6, 7, 8, 9, 11, 12, 13}
+STATUS_COLOR_HEX = {
+    "alarm": "#f4a3a3",
+    "ramping": "#f4d58d",
+    "on": "#a3e0a3",
+    "off": "#dddddd",
+    "unknown": "#ffffff",
+}
+
+
+def decode_status(status_code: int | None, is_on: bool | None = None) -> tuple[str, str]:
+    if status_code is None:
+        return "—", "off"
+    try:
+        bits = int(status_code)
+    except (TypeError, ValueError):
+        return str(status_code), "unknown"
+
+    active = [(bit, label) for bit, label in CH_STATUS_BITS if bits & (1 << bit)]
+    labels = [label for _, label in active]
+    on = bool(bits & 0x1) or bool(is_on)
+    ramping = bool(bits & 0x2) or bool(bits & 0x4)
+    alarm = any(bit in STATUS_ALARM_BITS for bit, _ in active)
+
+    if alarm:
+        state = "alarm"
+    elif ramping:
+        state = "ramping"
+    elif on:
+        state = "on"
+    else:
+        state = "off"
+
+    text = " ".join(labels) if labels else ("ON" if on else "OFF")
+    return text, state
+
+
+def format_status_text(status_code: int, is_on: bool | None = None) -> str:
+    return decode_status(status_code, is_on)[0]
+
+
+def status_color_hex(status_code: int | None, is_on: bool | None = None) -> str:
+    return STATUS_COLOR_HEX[decode_status(status_code, is_on)[1]]
 
 
 @dataclass(frozen=True)
@@ -247,10 +304,19 @@ class ChannelSnapshot:
     channel_index: int
     polarity: str
     vmon_v: float
-    imon_na: float
+    imon_ua: float
     is_on: bool
     status_code: int
     status_text: str
+
+
+@dataclass(frozen=True)
+class ChannelControlState:
+    label: str
+    channel_index: int
+    vset_v: float
+    ramp_up_v_s: float
+    ramp_down_v_s: float
 
 
 @dataclass(frozen=True)
@@ -312,22 +378,22 @@ class RunPointRecord:
     e_transfer_kv_cm: float
     timestamp_iso: str
     c_vmon_v: float
-    c_imon_na: float
+    c_imon_ua: float
     c_is_on: bool
     c_status_code: int
     c_status_text: str
     t1_vmon_v: float
-    t1_imon_na: float
+    t1_imon_ua: float
     t1_is_on: bool
     t1_status_code: int
     t1_status_text: str
     b1_vmon_v: float
-    b1_imon_na: float
+    b1_imon_ua: float
     b1_is_on: bool
     b1_status_code: int
     b1_status_text: str
     t2_vmon_v: float
-    t2_imon_na: float
+    t2_imon_ua: float
     t2_is_on: bool
     t2_status_code: int
     t2_status_text: str
@@ -352,7 +418,7 @@ class RunPointRecord:
             snapshot = by_label[label]
             return (
                 snapshot.vmon_v,
-                snapshot.imon_na,
+                snapshot.imon_ua,
                 snapshot.is_on,
                 snapshot.status_code,
                 snapshot.status_text,
@@ -368,22 +434,22 @@ class RunPointRecord:
             e_transfer_kv_cm=e_transfer_kv_cm,
             timestamp_iso=timestamp_iso,
             c_vmon_v=values("C")[0],
-            c_imon_na=values("C")[1],
+            c_imon_ua=values("C")[1],
             c_is_on=values("C")[2],
             c_status_code=values("C")[3],
             c_status_text=values("C")[4],
             t1_vmon_v=values("T1")[0],
-            t1_imon_na=values("T1")[1],
+            t1_imon_ua=values("T1")[1],
             t1_is_on=values("T1")[2],
             t1_status_code=values("T1")[3],
             t1_status_text=values("T1")[4],
             b1_vmon_v=values("B1")[0],
-            b1_imon_na=values("B1")[1],
+            b1_imon_ua=values("B1")[1],
             b1_is_on=values("B1")[2],
             b1_status_code=values("B1")[3],
             b1_status_text=values("B1")[4],
             t2_vmon_v=values("T2")[0],
-            t2_imon_na=values("T2")[1],
+            t2_imon_ua=values("T2")[1],
             t2_is_on=values("T2")[2],
             t2_status_code=values("T2")[3],
             t2_status_text=values("T2")[4],
@@ -403,7 +469,7 @@ class RunPointRecord:
                 CHANNEL_BY_LABEL["C"].channel_index,
                 CHANNEL_BY_LABEL["C"].polarity,
                 self.c_vmon_v,
-                self.c_imon_na,
+                self.c_imon_ua,
                 self.c_is_on,
                 self.c_status_code,
                 self.c_status_text,
@@ -413,7 +479,7 @@ class RunPointRecord:
                 CHANNEL_BY_LABEL["T1"].channel_index,
                 CHANNEL_BY_LABEL["T1"].polarity,
                 self.t1_vmon_v,
-                self.t1_imon_na,
+                self.t1_imon_ua,
                 self.t1_is_on,
                 self.t1_status_code,
                 self.t1_status_text,
@@ -423,7 +489,7 @@ class RunPointRecord:
                 CHANNEL_BY_LABEL["B1"].channel_index,
                 CHANNEL_BY_LABEL["B1"].polarity,
                 self.b1_vmon_v,
-                self.b1_imon_na,
+                self.b1_imon_ua,
                 self.b1_is_on,
                 self.b1_status_code,
                 self.b1_status_text,
@@ -433,7 +499,7 @@ class RunPointRecord:
                 CHANNEL_BY_LABEL["T2"].channel_index,
                 CHANNEL_BY_LABEL["T2"].polarity,
                 self.t2_vmon_v,
-                self.t2_imon_na,
+                self.t2_imon_ua,
                 self.t2_is_on,
                 self.t2_status_code,
                 self.t2_status_text,
@@ -455,7 +521,19 @@ class BaseCaenInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def read_channel_controls(self) -> list[ChannelControlState]:
+        raise NotImplementedError
+
+    @abstractmethod
     def set_ramp_rates(self, ramp_up_v_s: float, ramp_down_v_s: float) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def set_channel_ramp_up_rates(self, ramp_up_by_label: Mapping[str, float]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def set_channel_ramp_down_rates(self, ramp_down_by_label: Mapping[str, float]) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -494,7 +572,13 @@ class SimulationInterface(BaseCaenInterface):
             "v_thgem1_v": 150.0,
         }
         self._channel_state = {
-            label: {"voltage_v": 1.0, "is_on": False, "status_code": 0}
+            label: {
+                "voltage_v": 1.0,
+                "is_on": False,
+                "status_code": 0,
+                "ramp_up_v_s": 300.0,
+                "ramp_down_v_s": 300.0,
+            }
             for label in CHANNEL_LABELS
         }
 
@@ -523,25 +607,50 @@ class SimulationInterface(BaseCaenInterface):
             base_voltage = state["voltage_v"] if state["is_on"] else 0.0
             measured_voltage = max(0.0, base_voltage + self._random.gauss(0.0, 0.02))
             measured_current = self._simulate_current(channel)
-            status_code = int(state["status_code"])
+            status_code = int(state["status_code"] or (1 if state["is_on"] else 0))
             snapshots.append(
                 ChannelSnapshot(
                     label=channel.label,
                     channel_index=channel.channel_index,
                     polarity=channel.polarity,
                     vmon_v=measured_voltage,
-                    imon_na=measured_current,
+                    imon_ua=measured_current,
                     is_on=bool(state["is_on"]),
                     status_code=status_code,
-                    status_text=format_status_text(status_code),
+                    status_text=format_status_text(status_code, bool(state["is_on"])),
                 )
             )
         return snapshots
+
+    def read_channel_controls(self) -> list[ChannelControlState]:
+        self._ensure_connected()
+        return [
+            ChannelControlState(
+                label=channel.label,
+                channel_index=channel.channel_index,
+                vset_v=float(self._channel_state[channel.label]["voltage_v"]),
+                ramp_up_v_s=float(self._channel_state[channel.label]["ramp_up_v_s"]),
+                ramp_down_v_s=float(self._channel_state[channel.label]["ramp_down_v_s"]),
+            )
+            for channel in CHANNEL_DEFINITIONS
+        ]
 
     def set_ramp_rates(self, ramp_up_v_s: float, ramp_down_v_s: float) -> None:
         self._ensure_connected()
         self._ramp_up_v_s = float(ramp_up_v_s)
         self._ramp_down_v_s = float(ramp_down_v_s)
+        self.set_channel_ramp_up_rates({label: float(ramp_up_v_s) for label in CHANNEL_LABELS})
+        self.set_channel_ramp_down_rates({label: float(ramp_down_v_s) for label in CHANNEL_LABELS})
+
+    def set_channel_ramp_up_rates(self, ramp_up_by_label: Mapping[str, float]) -> None:
+        self._ensure_connected()
+        for label, ramp_up_v_s in ramp_up_by_label.items():
+            self._channel_state[label]["ramp_up_v_s"] = float(ramp_up_v_s)
+
+    def set_channel_ramp_down_rates(self, ramp_down_by_label: Mapping[str, float]) -> None:
+        self._ensure_connected()
+        for label, ramp_down_v_s in ramp_down_by_label.items():
+            self._channel_state[label]["ramp_down_v_s"] = float(ramp_down_v_s)
 
     def set_channel_voltages(self, voltages_by_label: Mapping[str, float]) -> None:
         self._ensure_connected()
@@ -552,11 +661,13 @@ class SimulationInterface(BaseCaenInterface):
         self._ensure_connected()
         for label in labels:
             self._channel_state[label]["is_on"] = True
+            self._channel_state[label]["status_code"] = 1
 
     def power_off_channels(self, labels: Sequence[str]) -> None:
         self._ensure_connected()
         for label in labels:
             self._channel_state[label]["is_on"] = False
+            self._channel_state[label]["status_code"] = 0
 
     def safe_shutdown(self, labels: Sequence[str]) -> None:
         self._ensure_connected()
@@ -893,25 +1004,52 @@ class CaenDirectSerialInterface(BaseCaenInterface):
             voltage = abs(self._read_channel_float(channel.channel_index, DIRECT_SERIAL_PARAM_VMON))
             current = self._normalize_current(channel, self._read_channel_float(channel.channel_index, DIRECT_SERIAL_PARAM_IMON))
             status_code = self._read_channel_int(channel.channel_index, DIRECT_SERIAL_PARAM_STAT)
+            is_on = bool(status_code & DIRECT_SERIAL_STATUS_ON_MASK)
             snapshots.append(
                 ChannelSnapshot(
                     label=channel.label,
                     channel_index=channel.channel_index,
                     polarity=channel.polarity,
                     vmon_v=voltage,
-                    imon_na=current,
-                    is_on=bool(status_code & DIRECT_SERIAL_STATUS_ON_MASK),
+                    imon_ua=current,
+                    is_on=is_on,
                     status_code=status_code,
-                    status_text=format_status_text(status_code),
+                    status_text=format_status_text(status_code, is_on),
                 )
             )
         return snapshots
 
+    def read_channel_controls(self) -> list[ChannelControlState]:
+        self._ensure_connected()
+        return [
+            ChannelControlState(
+                label=channel.label,
+                channel_index=channel.channel_index,
+                vset_v=abs(self._read_channel_float(channel.channel_index, DIRECT_SERIAL_PARAM_VSET)),
+                ramp_up_v_s=float(self._read_channel_float(channel.channel_index, DIRECT_SERIAL_PARAM_RUP)),
+                ramp_down_v_s=float(self._read_channel_float(channel.channel_index, DIRECT_SERIAL_PARAM_RDW)),
+            )
+            for channel in CHANNEL_DEFINITIONS
+        ]
+
     def set_ramp_rates(self, ramp_up_v_s: float, ramp_down_v_s: float) -> None:
         self._ensure_connected()
-        for channel in CHANNEL_DEFINITIONS:
-            self._set_channel_value(channel.channel_index, DIRECT_SERIAL_PARAM_RUP, float(ramp_up_v_s))
-            self._set_channel_value(channel.channel_index, DIRECT_SERIAL_PARAM_RDW, float(ramp_down_v_s))
+        self.set_channel_ramp_up_rates({label: float(ramp_up_v_s) for label in CHANNEL_LABELS})
+        self.set_channel_ramp_down_rates({label: float(ramp_down_v_s) for label in CHANNEL_LABELS})
+
+    def set_channel_ramp_up_rates(self, ramp_up_by_label: Mapping[str, float]) -> None:
+        self._ensure_connected()
+        for label, ramp_up_v_s in ramp_up_by_label.items():
+            self._set_channel_value(CHANNEL_BY_LABEL[label].channel_index, DIRECT_SERIAL_PARAM_RUP, float(ramp_up_v_s))
+
+    def set_channel_ramp_down_rates(self, ramp_down_by_label: Mapping[str, float]) -> None:
+        self._ensure_connected()
+        for label, ramp_down_v_s in ramp_down_by_label.items():
+            self._set_channel_value(
+                CHANNEL_BY_LABEL[label].channel_index,
+                DIRECT_SERIAL_PARAM_RDW,
+                float(ramp_down_v_s),
+            )
 
     def set_channel_voltages(self, voltages_by_label: Mapping[str, float]) -> None:
         self._ensure_connected()
@@ -1146,12 +1284,12 @@ class CaenDirectSerialInterface(BaseCaenInterface):
         except Exception:
             return 0
 
-    def _normalize_current(self, channel: ChannelDefinition, current_na: float) -> float:
-        if channel.polarity == "-" and current_na > 0.0:
-            return -current_na
-        if channel.polarity == "+" and current_na < 0.0:
-            return -current_na
-        return current_na
+    def _normalize_current(self, channel: ChannelDefinition, current_ua: float) -> float:
+        if channel.polarity == "-" and current_ua > 0.0:
+            return -current_ua
+        if channel.polarity == "+" and current_ua < 0.0:
+            return -current_ua
+        return current_ua
 
     def _ensure_connected(self) -> None:
         if not self._connected or self._serial is None or self._active_protocol is None:
@@ -1339,12 +1477,29 @@ class CAENWrapperInterface(BaseCaenInterface):
         statuses = self._read_ulong_param("status")
         return self.build_snapshots(voltages, currents, powers, statuses)
 
+    def read_channel_controls(self) -> list[ChannelControlState]:
+        self._ensure_connected()
+        voltage_sets = self._read_float_param("voltage_set")
+        ramp_ups = self._read_float_param("ramp_up")
+        ramp_downs = self._read_float_param("ramp_down")
+        return self.build_control_states(voltage_sets, ramp_ups, ramp_downs)
+
     def set_ramp_rates(self, ramp_up_v_s: float, ramp_down_v_s: float) -> None:
         self._ensure_connected()
-        for label in CHANNEL_LABELS:
+        self.set_channel_ramp_up_rates({label: ramp_up_v_s for label in CHANNEL_LABELS})
+        self.set_channel_ramp_down_rates({label: ramp_down_v_s for label in CHANNEL_LABELS})
+
+    def set_channel_ramp_up_rates(self, ramp_up_by_label: Mapping[str, float]) -> None:
+        self._ensure_connected()
+        for label, ramp_up_v_s in ramp_up_by_label.items():
             channel_index = CHANNEL_BY_LABEL[label].channel_index
-            self._set_float_param(channel_index, "ramp_up", ramp_up_v_s)
-            self._set_float_param(channel_index, "ramp_down", ramp_down_v_s)
+            self._set_float_param(channel_index, "ramp_up", float(ramp_up_v_s))
+
+    def set_channel_ramp_down_rates(self, ramp_down_by_label: Mapping[str, float]) -> None:
+        self._ensure_connected()
+        for label, ramp_down_v_s in ramp_down_by_label.items():
+            channel_index = CHANNEL_BY_LABEL[label].channel_index
+            self._set_float_param(channel_index, "ramp_down", float(ramp_down_v_s))
 
     def set_channel_voltages(self, voltages_by_label: Mapping[str, float]) -> None:
         self._ensure_connected()
@@ -1597,26 +1752,44 @@ class CAENWrapperInterface(BaseCaenInterface):
     def build_snapshots(
         self,
         voltages_v: Sequence[float],
-        currents_na: Sequence[float],
+        currents_ua: Sequence[float],
         powers: Sequence[int],
         statuses: Sequence[int],
     ) -> list[ChannelSnapshot]:
         snapshots: list[ChannelSnapshot] = []
         for index, channel in enumerate(CHANNEL_DEFINITIONS):
             status_code = int(statuses[index])
+            is_on = bool(powers[index])
             snapshots.append(
                 ChannelSnapshot(
                     label=channel.label,
                     channel_index=channel.channel_index,
                     polarity=channel.polarity,
                     vmon_v=float(abs(voltages_v[index])),
-                    imon_na=float(currents_na[index]),
-                    is_on=bool(powers[index]),
+                    imon_ua=float(currents_ua[index]),
+                    is_on=is_on,
                     status_code=status_code,
-                    status_text=format_status_text(status_code),
+                    status_text=format_status_text(status_code, is_on),
                 )
             )
         return snapshots
+
+    def build_control_states(
+        self,
+        voltage_sets_v: Sequence[float],
+        ramp_ups_v_s: Sequence[float],
+        ramp_downs_v_s: Sequence[float],
+    ) -> list[ChannelControlState]:
+        return [
+            ChannelControlState(
+                label=channel.label,
+                channel_index=channel.channel_index,
+                vset_v=float(abs(voltage_sets_v[index])),
+                ramp_up_v_s=float(ramp_ups_v_s[index]),
+                ramp_down_v_s=float(ramp_downs_v_s[index]),
+            )
+            for index, channel in enumerate(CHANNEL_DEFINITIONS)
+        ]
 
 
 class CaenLibsInterface(BaseCaenInterface):
@@ -1725,11 +1898,32 @@ class CaenLibsInterface(BaseCaenInterface):
         # build_snapshots is self-independent; reuse the CAENWrapperInterface impl.
         return CAENWrapperInterface.build_snapshots(self, voltages, currents, powers, statuses)
 
-    def set_ramp_rates(self, ramp_up_v_s: float, ramp_down_v_s: float) -> None:
+    def read_channel_controls(self) -> list[ChannelControlState]:
         self._ensure_connected()
         channels = self._channel_indices()
-        self._device.set_ch_param(self._slot, channels, self._parameter_names["ramp_up"], float(ramp_up_v_s))
-        self._device.set_ch_param(self._slot, channels, self._parameter_names["ramp_down"], float(ramp_down_v_s))
+        voltage_sets = self._get_floats("voltage_set", channels)
+        ramp_ups = self._get_floats("ramp_up", channels)
+        ramp_downs = self._get_floats("ramp_down", channels)
+        return CAENWrapperInterface.build_control_states(self, voltage_sets, ramp_ups, ramp_downs)
+
+    def set_ramp_rates(self, ramp_up_v_s: float, ramp_down_v_s: float) -> None:
+        self._ensure_connected()
+        self.set_channel_ramp_up_rates({label: float(ramp_up_v_s) for label in CHANNEL_LABELS})
+        self.set_channel_ramp_down_rates({label: float(ramp_down_v_s) for label in CHANNEL_LABELS})
+
+    def set_channel_ramp_up_rates(self, ramp_up_by_label: Mapping[str, float]) -> None:
+        self._ensure_connected()
+        name = self._parameter_names["ramp_up"]
+        for label, ramp_up_v_s in ramp_up_by_label.items():
+            channel_index = CHANNEL_BY_LABEL[label].channel_index
+            self._device.set_ch_param(self._slot, [channel_index], name, float(ramp_up_v_s))
+
+    def set_channel_ramp_down_rates(self, ramp_down_by_label: Mapping[str, float]) -> None:
+        self._ensure_connected()
+        name = self._parameter_names["ramp_down"]
+        for label, ramp_down_v_s in ramp_down_by_label.items():
+            channel_index = CHANNEL_BY_LABEL[label].channel_index
+            self._device.set_ch_param(self._slot, [channel_index], name, float(ramp_down_v_s))
 
     def set_channel_voltages(self, voltages_by_label: Mapping[str, float]) -> None:
         self._ensure_connected()
@@ -1842,8 +2036,17 @@ class CaenUsbVcpInterface(BaseCaenInterface):
     def read_all_channels(self) -> list[ChannelSnapshot]:
         return self._require_backend().read_all_channels()
 
+    def read_channel_controls(self) -> list[ChannelControlState]:
+        return self._require_backend().read_channel_controls()
+
     def set_ramp_rates(self, ramp_up_v_s: float, ramp_down_v_s: float) -> None:
         self._require_backend().set_ramp_rates(ramp_up_v_s, ramp_down_v_s)
+
+    def set_channel_ramp_up_rates(self, ramp_up_by_label: Mapping[str, float]) -> None:
+        self._require_backend().set_channel_ramp_up_rates(ramp_up_by_label)
+
+    def set_channel_ramp_down_rates(self, ramp_down_by_label: Mapping[str, float]) -> None:
+        self._require_backend().set_channel_ramp_down_rates(ramp_down_by_label)
 
     def set_channel_voltages(self, voltages_by_label: Mapping[str, float]) -> None:
         self._require_backend().set_channel_voltages(voltages_by_label)

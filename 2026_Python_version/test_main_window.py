@@ -17,8 +17,10 @@ from caen_interface import (
     CHANNEL_LABELS,
     CAEN_TRANSPORT_RAW_WRAPPER,
     USB_VCP_BAUD_OPTIONS,
+    ChannelControlState,
     ChannelSnapshot,
     UsbVcpSettings,
+    status_color_hex,
 )
 from main_window import MainWindow
 
@@ -46,34 +48,73 @@ class MainWindowTabbedShellTests(unittest.TestCase):
         self.assertEqual(set(self.window.channel_cells), set(CHANNEL_LABELS))
         self.assertEqual(self.window.channel_table.rowCount(), len(CHANNEL_LABELS))
 
+    def test_channel_grid_columns_match_geco_style_layout(self) -> None:
+        headers = [
+            self.window.channel_table.horizontalHeaderItem(i).text()
+            for i in range(self.window.channel_table.columnCount())
+        ]
+        self.assertEqual(
+            headers,
+            ["Channel", "Polarity", "Pw", "VSet [V]", "VMon [V]", "IMon [μA]", "RUp [V/s]", "RDW [V/s]", "Status"],
+        )
+
     def test_channel_refresh_updates_grid_cells(self) -> None:
         self.window._on_channel_refresh(
             [
-                ChannelSnapshot("C", 0, "-", 151.0, -0.2, True, 0, "OK"),
-                ChannelSnapshot("T1", 1, "-", 1.0, -0.3, True, 0, "OK"),
-                ChannelSnapshot("B1", 2, "+", 149.0, 0.4, True, 0, "OK"),
-                ChannelSnapshot("T2", 3, "+", 349.0, 0.5, False, 0, "OK"),
+                ChannelSnapshot("C", 0, "-", 151.0, -0.2, True, 1, "ON"),
+                ChannelSnapshot("T1", 1, "-", 1.0, -0.3, True, 3, "ON Ramp↑"),
+                ChannelSnapshot("B1", 2, "+", 149.0, 0.4, True, 1 << 7, "TRIP"),
+                ChannelSnapshot("T2", 3, "+", 349.0, 0.5, False, 0, "OFF"),
             ]
         )
         c_cells = self.window.channel_cells["C"]
         self.assertEqual(c_cells["voltage"].text(), "-151.0")  # negative polarity -> signed
         self.assertEqual(c_cells["current"].text(), "-0.2000")
         self.assertEqual(c_cells["power"].text(), "ON")
+        self.assertEqual(c_cells["status"].text(), "ON")
+        self.assertEqual(c_cells["status"].background().color().name(), status_color_hex(1, True))
+        self.assertEqual(self.window.channel_cells["T1"]["status"].text(), "ON Ramp↑")
+        self.assertEqual(self.window.channel_cells["B1"]["status"].text(), "TRIP")
         self.assertEqual(self.window.channel_cells["T2"]["power"].text(), "OFF")
 
     def test_channels_grid_has_manual_controls(self) -> None:
         for label in CHANNEL_LABELS:
             cells = self.window.channel_cells[label]
             self.assertIsInstance(cells["vset"], QtWidgets.QDoubleSpinBox)
+            self.assertIsInstance(cells["ramp_up"], QtWidgets.QDoubleSpinBox)
+            self.assertIsInstance(cells["ramp_down"], QtWidgets.QDoubleSpinBox)
             self.assertIsInstance(cells["power"], QtWidgets.QPushButton)
             self.assertTrue(cells["power"].isCheckable())
         self.assertTrue(hasattr(self.window, "all_on_button"))
         self.assertTrue(hasattr(self.window, "all_off_button"))
+        self.assertTrue(hasattr(self.window, "refresh_setpoints_button"))
 
     def test_manual_controls_disabled_when_disconnected(self) -> None:
         self.assertFalse(self.window.channel_cells["C"]["vset"].isEnabled())
+        self.assertFalse(self.window.channel_cells["C"]["ramp_up"].isEnabled())
+        self.assertFalse(self.window.channel_cells["C"]["ramp_down"].isEnabled())
         self.assertFalse(self.window.channel_cells["C"]["power"].isEnabled())
         self.assertFalse(self.window.all_on_button.isEnabled())
+        self.assertFalse(self.window.refresh_setpoints_button.isEnabled())
+
+    def test_control_refresh_seeds_editable_boxes_from_hardware(self) -> None:
+        self.window._on_control_refresh(
+            [
+                ChannelControlState("C", 0, 120.0, 10.0, 11.0),
+                ChannelControlState("T1", 1, 220.0, 20.0, 21.0),
+                ChannelControlState("B1", 2, 320.0, 30.0, 31.0),
+                ChannelControlState("T2", 3, 420.0, 40.0, 41.0),
+            ]
+        )
+
+        c_cells = self.window.channel_cells["C"]
+        self.assertAlmostEqual(c_cells["vset"].value(), 120.0)
+        self.assertAlmostEqual(c_cells["ramp_up"].value(), 10.0)
+        self.assertAlmostEqual(c_cells["ramp_down"].value(), 11.0)
+
+    def test_channels_footer_status_updates(self) -> None:
+        self.window._set_channels_status("Setpoints refreshed.")
+        self.assertEqual(self.window.channels_status_label.text(), "Setpoints refreshed.")
 
     def test_hardware_settings_defaults_match_usb_vcp_defaults(self) -> None:
         self.window.backend_combo.setCurrentText("CAEN USB-VCP")
@@ -160,6 +201,12 @@ class MainWindowTabbedShellTests(unittest.TestCase):
 
         worker.set_channel_voltage("C", 234.0)
         self.assertAlmostEqual(worker.backend._channel_state["C"]["voltage_v"], 234.0)
+
+        worker.set_channel_ramp_up("C", 12.0)
+        self.assertAlmostEqual(worker.backend._channel_state["C"]["ramp_up_v_s"], 12.0)
+
+        worker.set_channel_ramp_down("C", 8.0)
+        self.assertAlmostEqual(worker.backend._channel_state["C"]["ramp_down_v_s"], 8.0)
 
         worker.set_channel_power("C", True)
         self.assertTrue(worker.backend._channel_state["C"]["is_on"])

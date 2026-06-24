@@ -32,8 +32,8 @@ def _selftest(app) -> int:
         time.sleep(0.02)
 
     class _Snap:
-        def __init__(self, na: float) -> None:
-            self.imon_na = na
+        def __init__(self, ua: float) -> None:
+            self.imon_ua = ua
 
     class _Rec:
         def __init__(self, label: str) -> None:
