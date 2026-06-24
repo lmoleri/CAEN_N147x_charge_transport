@@ -38,7 +38,17 @@ from caen_interface import (
 )
 from data_logger import DataLogger
 from plotly_view import PlotlyScanView
-from scan_controller import ScanCallbacks, ScanController
+from scan_controller import (
+    DEFAULT_WAIT_SECONDS,
+    DRIFT_GAP_CM,
+    INDUCTION_GAP_CM,
+    VTHGEM1_START_V,
+    VTHGEM1_STEP_V,
+    VTHGEM1_STOP_V,
+    ScanCallbacks,
+    ScanController,
+    ScanParameters,
+)
 
 
 class ScanWorker(QtCore.QObject):
@@ -47,7 +57,6 @@ class ScanWorker(QtCore.QObject):
     channel_refresh = QtCore.pyqtSignal(object)
     control_refresh = QtCore.pyqtSignal(object)
     scan_prepared = QtCore.pyqtSignal(object, str)
-    subscan_started = QtCore.pyqtSignal(str)
     point_recorded = QtCore.pyqtSignal(object)
     scan_finished = QtCore.pyqtSignal(bool, bool, str, object)
     error = QtCore.pyqtSignal(str)
@@ -128,8 +137,8 @@ class ScanWorker(QtCore.QObject):
         except Exception as exc:  # pragma: no cover - hardware-dependent
             self.error.emit(str(exc))
 
-    @QtCore.pyqtSlot(str)
-    def start_scan(self, mode: str) -> None:
+    @QtCore.pyqtSlot(object)
+    def start_scan(self, params: object) -> None:
         if self.backend is None:
             self.error.emit("Connect to a backend before starting a scan.")
             return
@@ -138,12 +147,10 @@ class ScanWorker(QtCore.QObject):
             return
 
         logger = DataLogger(self.base_dir / "measurements")
-        csv_path = logger.open_run(mode)
-        field_configs = list(self.controller.field_configs_for_mode(mode))
-        self.scan_prepared.emit(field_configs, str(csv_path))
+        csv_path = logger.open_run(params.label)
+        self.scan_prepared.emit(params, str(csv_path))
 
         callbacks = ScanCallbacks(
-            on_subscan_started=lambda field_config: self.subscan_started.emit(field_config.label),
             on_point_recorded=self.point_recorded.emit,
             on_channel_refresh=self.channel_refresh.emit,
             on_status_message=self.log_message.emit,
@@ -152,7 +159,7 @@ class ScanWorker(QtCore.QObject):
         self.abort_event.clear()
         self.scan_active = True
         try:
-            result = self.controller.run_recipe(self.backend, mode, logger, callbacks, self.abort_event)
+            result = self.controller.run_scan(self.backend, params, logger, callbacks, self.abort_event)
             final_snapshots = self.backend.read_all_channels()
             self.scan_finished.emit(result.success, result.aborted, result.message, final_snapshots)
         except Exception as exc:  # pragma: no cover - hardware-dependent
@@ -244,7 +251,7 @@ class MainWindow(QtWidgets.QMainWindow):
     disconnect_requested = QtCore.pyqtSignal()
     refresh_requested = QtCore.pyqtSignal()
     refresh_controls_requested = QtCore.pyqtSignal()
-    start_scan_requested = QtCore.pyqtSignal(str)
+    start_scan_requested = QtCore.pyqtSignal(object)
     set_voltage_requested = QtCore.pyqtSignal(str, float)
     set_ramp_up_requested = QtCore.pyqtSignal(str, float)
     set_ramp_down_requested = QtCore.pyqtSignal(str, float)
@@ -282,7 +289,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.channel_refresh.connect(self._on_channel_refresh)
         self.worker.control_refresh.connect(self._on_control_refresh)
         self.worker.scan_prepared.connect(self._on_scan_prepared)
-        self.worker.subscan_started.connect(self._on_subscan_started)
         self.worker.point_recorded.connect(self._on_point_recorded)
         self.worker.scan_finished.connect(self._on_scan_finished)
         self.worker.error.connect(self._on_error)
@@ -295,7 +301,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._build_ui()
         self._populate_serial_ports()
-        self._update_recipe_summary()
+        self._update_scan_summary()
         self._set_connection_state(False)
         self._set_scan_state(False)
 
@@ -423,33 +429,93 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_scan_group(self) -> QtWidgets.QGroupBox:
         group = QtWidgets.QGroupBox("Scan Control")
         layout = QtWidgets.QGridLayout(group)
+        self._loading_preset = False
 
-        self.mode_combo = QtWidgets.QComboBox()
-        self.mode_combo.addItems(self.controller.mode_names())
-        self.mode_combo.currentTextChanged.connect(self._update_recipe_summary)
+        self.preset_combo = QtWidgets.QComboBox()
+        self.preset_combo.addItem("Custom")
+        self.preset_combo.addItems(self.controller.preset_names())
 
+        def _spin(minimum, maximum, decimals, step, value, suffix):
+            box = QtWidgets.QDoubleSpinBox()
+            box.setRange(minimum, maximum)
+            box.setDecimals(decimals)
+            box.setSingleStep(step)
+            box.setSuffix(suffix)
+            box.setKeyboardTracking(False)
+            box.setValue(value)
+            return box
+
+        self.vstart_spin = _spin(0.0, 5000.0, 0, 25.0, VTHGEM1_START_V, " V")
+        self.vstop_spin = _spin(0.0, 5000.0, 0, 25.0, VTHGEM1_STOP_V, " V")
+        self.vstep_spin = _spin(1.0, 1000.0, 0, 5.0, VTHGEM1_STEP_V, " V")
+        self.wait_spin = _spin(0.0, 600.0, 1, 0.5, DEFAULT_WAIT_SECONDS, " s")
+        self.drift_field_spin = _spin(-50.0, 50.0, 2, 0.1, 0.0, " kV/cm")
+        self.drift_gap_spin = _spin(0.01, 100.0, 2, 0.1, DRIFT_GAP_CM, " cm")
+        self.induction_field_spin = _spin(-50.0, 50.0, 2, 0.1, 1.0, " kV/cm")
+        self.induction_gap_spin = _spin(0.01, 100.0, 2, 0.05, INDUCTION_GAP_CM, " cm")
+        self._scan_spins = (
+            self.vstart_spin, self.vstop_spin, self.vstep_spin, self.wait_spin,
+            self.drift_field_spin, self.drift_gap_spin, self.induction_field_spin, self.induction_gap_spin,
+        )
+
+        self.uv_check = QtWidgets.QCheckBox("UV lamp ON (recorded as metadata)")
+        self.uv_check.setChecked(True)
         self.start_button = QtWidgets.QPushButton("Start Scan")
-        self.start_button.clicked.connect(self._queue_start_scan)
         self.abort_button = QtWidgets.QPushButton("Abort")
-        self.abort_button.clicked.connect(self._request_abort)
+        self.persist_check = QtWidgets.QCheckBox("Persist (overlay runs)")
+        self.clear_plot_button = QtWidgets.QPushButton("Clear plot")
 
-        self.recipe_summary_label = QtWidgets.QLabel()
-        self.recipe_summary_label.setWordWrap(True)
+        self.scan_summary_label = QtWidgets.QLabel()
+        self.scan_summary_label.setWordWrap(True)
         self.output_path_label = QtWidgets.QLabel(f"CSV output: {self.base_dir / 'measurements'}")
         self.output_path_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        self.uv_note_label = QtWidgets.QLabel(
-            "Reference mode is intended to be taken with the UV lamp OFF. All other modes assume UV ON."
-        )
-        self.uv_note_label.setWordWrap(True)
 
-        layout.addWidget(QtWidgets.QLabel("Recipe"), 0, 0)
-        layout.addWidget(self.mode_combo, 0, 1)
-        layout.addWidget(self.start_button, 0, 2)
-        layout.addWidget(self.abort_button, 0, 3)
-        layout.addWidget(self.recipe_summary_label, 1, 0, 1, 4)
-        layout.addWidget(self.output_path_label, 2, 0, 1, 4)
-        layout.addWidget(self.uv_note_label, 3, 0, 1, 4)
+        # Wire signals only after every widget exists, so the setValue() calls
+        # above (during construction) cannot fire the change handlers.
+        self.preset_combo.currentTextChanged.connect(self._on_preset_selected)
+        for box in self._scan_spins:
+            box.valueChanged.connect(self._on_scan_param_changed)
+        self.uv_check.toggled.connect(self._on_scan_param_changed)
+        self.start_button.clicked.connect(self._queue_start_scan)
+        self.abort_button.clicked.connect(self._request_abort)
+        self.persist_check.toggled.connect(lambda on: self.plot_tabs.set_persist(on))
+        self.clear_plot_button.clicked.connect(lambda: self.plot_tabs.clear())
+
+        r = 0
+        layout.addWidget(QtWidgets.QLabel("Preset"), r, 0)
+        layout.addWidget(self.preset_combo, r, 1)
+        layout.addWidget(self.start_button, r, 2)
+        layout.addWidget(self.abort_button, r, 3)
+        r += 1
+        layout.addWidget(QtWidgets.QLabel("V_THGEM1 start"), r, 0)
+        layout.addWidget(self.vstart_spin, r, 1)
+        layout.addWidget(QtWidgets.QLabel("stop"), r, 2)
+        layout.addWidget(self.vstop_spin, r, 3)
+        r += 1
+        layout.addWidget(QtWidgets.QLabel("V_THGEM1 step"), r, 0)
+        layout.addWidget(self.vstep_spin, r, 1)
+        layout.addWidget(QtWidgets.QLabel("Wait / point"), r, 2)
+        layout.addWidget(self.wait_spin, r, 3)
+        r += 1
+        layout.addWidget(QtWidgets.QLabel("Drift field"), r, 0)
+        layout.addWidget(self.drift_field_spin, r, 1)
+        layout.addWidget(QtWidgets.QLabel("Drift gap (C↔T1)"), r, 2)
+        layout.addWidget(self.drift_gap_spin, r, 3)
+        r += 1
+        layout.addWidget(QtWidgets.QLabel("Induction field"), r, 0)
+        layout.addWidget(self.induction_field_spin, r, 1)
+        layout.addWidget(QtWidgets.QLabel("Induction gap (B1↔T2)"), r, 2)
+        layout.addWidget(self.induction_gap_spin, r, 3)
+        r += 1
+        layout.addWidget(self.uv_check, r, 0, 1, 2)
+        layout.addWidget(self.persist_check, r, 2)
+        layout.addWidget(self.clear_plot_button, r, 3)
+        r += 1
+        layout.addWidget(self.scan_summary_label, r, 0, 1, 4)
+        r += 1
+        layout.addWidget(self.output_path_label, r, 0, 1, 4)
         layout.setColumnStretch(1, 1)
+        layout.setColumnStretch(3, 1)
         return group
 
     def _build_channels_tab(self) -> QtWidgets.QWidget:
@@ -627,9 +693,56 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.com_combo.addItem("COM1")
 
-    def _update_recipe_summary(self) -> None:
-        mode = self.mode_combo.currentText()
-        self.recipe_summary_label.setText(self.controller.describe_mode(mode))
+    def _current_scan_parameters(self) -> ScanParameters:
+        return ScanParameters(
+            label=self.preset_combo.currentText(),
+            vthgem1_start_v=self.vstart_spin.value(),
+            vthgem1_stop_v=self.vstop_spin.value(),
+            vthgem1_step_v=self.vstep_spin.value(),
+            drift_gap_cm=self.drift_gap_spin.value(),
+            drift_field_kv_cm=self.drift_field_spin.value(),
+            induction_gap_cm=self.induction_gap_spin.value(),
+            induction_field_kv_cm=self.induction_field_spin.value(),
+            wait_seconds=self.wait_spin.value(),
+            uv_expected=self.uv_check.isChecked(),
+        )
+
+    def _update_scan_summary(self) -> None:
+        self.scan_summary_label.setText(self._current_scan_parameters().describe())
+
+    def _on_preset_selected(self, name: str) -> None:
+        if name and name != "Custom":
+            params = self.controller.preset(name)
+            self._loading_preset = True
+            try:
+                self.vstart_spin.setValue(params.vthgem1_start_v)
+                self.vstop_spin.setValue(params.vthgem1_stop_v)
+                self.vstep_spin.setValue(params.vthgem1_step_v)
+                self.wait_spin.setValue(params.wait_seconds)
+                self.drift_field_spin.setValue(params.drift_field_kv_cm)
+                self.drift_gap_spin.setValue(params.drift_gap_cm)
+                self.induction_field_spin.setValue(params.induction_field_kv_cm)
+                self.induction_gap_spin.setValue(params.induction_gap_cm)
+                self.uv_check.setChecked(params.uv_expected)
+            finally:
+                self._loading_preset = False
+        self._update_scan_summary()
+
+    def _on_scan_param_changed(self, *_args) -> None:
+        if self._loading_preset:
+            return
+        if self.preset_combo.currentText() != "Custom":
+            self.preset_combo.blockSignals(True)
+            self.preset_combo.setCurrentText("Custom")
+            self.preset_combo.blockSignals(False)
+        self._update_scan_summary()
+
+    def _set_scan_inputs_enabled(self, enabled: bool) -> None:
+        self.preset_combo.setEnabled(enabled)
+        self.uv_check.setEnabled(enabled)
+        self.clear_plot_button.setEnabled(enabled)
+        for box in self._scan_spins:
+            box.setEnabled(enabled)
 
     def _queue_connect(self) -> None:
         backend_name = self.backend_combo.currentText()
@@ -650,7 +763,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.refresh_controls_requested.emit()
 
     def _queue_start_scan(self) -> None:
-        self.start_scan_requested.emit(self.mode_combo.currentText())
+        self.start_scan_requested.emit(self._current_scan_parameters())
 
     def _request_abort(self) -> None:
         if not self.scan_running:
@@ -759,19 +872,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_channels_status(self, message: str) -> None:
         self.channels_status_label.setText(message)
 
-    def _on_scan_prepared(self, field_configs: object, csv_path: str) -> None:
-        if isinstance(field_configs, (list, tuple)):
-            self.plot_tabs.reset_tabs(list(field_configs))
+    def _on_scan_prepared(self, params: object, csv_path: str) -> None:
+        self.plot_tabs.begin_run(params)
         self.output_path_label.setText(f"CSV output: {csv_path}")
         self.scan_running = True
         self.poll_timer.stop()
         self._set_scan_state(True)
-        self._append_log(f"Scan started. Writing CSV to {csv_path}")
+        self._append_log(f"Scan started ({params.describe()}). Writing CSV to {csv_path}")
         self.statusBar().showMessage("Scan running...")
-
-    def _on_subscan_started(self, subscan_label: str) -> None:
-        self.plot_tabs.activate_subscan(subscan_label)
-        self._append_log(f"Sub-scan: {subscan_label}")
 
     def _on_point_recorded(self, record: object) -> None:
         self.plot_tabs.append_record(record)
@@ -832,7 +940,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.data_bits_combo.setEnabled(not connected and not self.scan_running)
         self.stop_bits_combo.setEnabled(not connected and not self.scan_running)
         self.parity_combo.setEnabled(not connected and not self.scan_running)
-        self.mode_combo.setEnabled(not self.scan_running)
+        self._set_scan_inputs_enabled(not self.scan_running)
         self._set_manual_controls_enabled(connected and not self.scan_running)
         self._on_backend_selection_changed()
 
@@ -853,7 +961,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.data_bits_combo.setEnabled(not self.connected_backend and not running)
         self.stop_bits_combo.setEnabled(not self.connected_backend and not running)
         self.parity_combo.setEnabled(not self.connected_backend and not running)
-        self.mode_combo.setEnabled(not running)
+        self._set_scan_inputs_enabled(not running)
         self._set_manual_controls_enabled(self.connected_backend and not running)
         self._on_transport_selection_changed()
 

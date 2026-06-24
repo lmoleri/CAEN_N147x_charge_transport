@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import math
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Sequence
 
 from caen_interface import (
     CHANNEL_LABELS,
@@ -13,20 +14,86 @@ from caen_interface import (
     RunPointRecord,
 )
 
-VTHGEM1_START_V = 150
-VTHGEM1_STOP_V = 1500
-VTHGEM1_STEP_V = 25
+# Defaults (also used to seed the editable Scan-tab fields).
+VTHGEM1_START_V = 150.0
+VTHGEM1_STOP_V = 1500.0
+VTHGEM1_STEP_V = 25.0
 
 DRIFT_GAP_CM = 0.5
-TRANSFER_GAP_CM = 0.1
+INDUCTION_GAP_CM = 0.1  # gap between THGEM1 bottom (B1) and the top electrode (T2)
 MIN_HV_V = 1.0
 T1_ANCHOR_V = 1.0
 DEFAULT_WAIT_SECONDS = 7.0
 
 
 @dataclass(frozen=True)
+class ScanParameters:
+    """A single-curve scan: sweep V_THGEM1 while holding the drift and induction
+    fields (and their gaps) constant.
+
+    Geometry:  C ──drift gap── T1 ─[THGEM1]─ B1 ──induction gap── T2
+      V_THGEM1   = V_B1 − V_T1                (the swept multiplication voltage)
+      E_drift     = (V_C − V_T1) / drift_gap          (held constant)
+      E_induction = (V_T2 − V_B1) / induction_gap     (held constant)
+    """
+
+    label: str = "Custom"
+    vthgem1_start_v: float = VTHGEM1_START_V
+    vthgem1_stop_v: float = VTHGEM1_STOP_V
+    vthgem1_step_v: float = VTHGEM1_STEP_V
+    drift_gap_cm: float = DRIFT_GAP_CM
+    drift_field_kv_cm: float = 0.0
+    induction_gap_cm: float = INDUCTION_GAP_CM
+    induction_field_kv_cm: float = 1.0
+    wait_seconds: float = DEFAULT_WAIT_SECONDS
+    uv_expected: bool = True
+
+    def scan_values(self) -> tuple[float, ...]:
+        start, stop = float(self.vthgem1_start_v), float(self.vthgem1_stop_v)
+        step = abs(float(self.vthgem1_step_v))
+        if step <= 0:
+            return (start,) if start == stop else (start, stop)
+        direction = 1.0 if stop >= start else -1.0
+        count = int(math.floor(abs(stop - start) / step + 1e-9)) + 1
+        return tuple(round(start + direction * step * i, 6) for i in range(count))
+
+    def solve(self, v_thgem1_v: float) -> dict[str, float]:
+        t1_v = T1_ANCHOR_V
+        b1_v = max(MIN_HV_V, v_thgem1_v - t1_v)
+        c_v = max(MIN_HV_V, t1_v + self.drift_field_kv_cm * 1000.0 * self.drift_gap_cm)
+        t2_v = max(MIN_HV_V, b1_v + self.induction_field_kv_cm * 1000.0 * self.induction_gap_cm)
+        return {"C": c_v, "T1": t1_v, "B1": b1_v, "T2": t2_v}
+
+    def field_config(self) -> FieldConfig:
+        # The Simulation backend reads e_drift/e_transfer to model the current.
+        return FieldConfig(self.label, self.drift_field_kv_cm, self.induction_field_kv_cm, self.uv_expected)
+
+    def legend_label(self) -> str:
+        return f"Ed={self.drift_field_kv_cm:g}, Ei={self.induction_field_kv_cm:g} kV/cm"
+
+    def describe(self) -> str:
+        return (
+            f"V_THGEM1 {self.vthgem1_start_v:g} → {self.vthgem1_stop_v:g} V "
+            f"step {self.vthgem1_step_v:g} V ({len(self.scan_values())} pts) | "
+            f"E_drift {self.drift_field_kv_cm:g} kV/cm (gap {self.drift_gap_cm:g} cm) | "
+            f"E_induction {self.induction_field_kv_cm:g} kV/cm (gap {self.induction_gap_cm:g} cm) | "
+            f"wait {self.wait_seconds:g} s/pt | UV {'ON' if self.uv_expected else 'OFF'}"
+        )
+
+
+# Named presets pre-fill the editable Scan-tab fields. Each is a single curve;
+# overlay several with the plot's "persist" toggle to build a family.
+PRESETS: dict[str, ScanParameters] = {
+    "Reference": ScanParameters(label="Reference", drift_field_kv_cm=0.0, induction_field_kv_cm=0.0, uv_expected=False),
+    "Collection scan": ScanParameters(label="Collection", drift_field_kv_cm=0.0, induction_field_kv_cm=1.0),
+    "Transfer field scan": ScanParameters(label="Transfer", drift_field_kv_cm=0.0, induction_field_kv_cm=1.0),
+    "Drift field scan": ScanParameters(label="Drift", drift_field_kv_cm=0.0, induction_field_kv_cm=1.0),
+}
+
+
+@dataclass(frozen=True)
 class ScanCallbacks:
-    on_subscan_started: Callable[[FieldConfig], None] | None = None
+    on_scan_started: Callable[[ScanParameters], None] | None = None
     on_point_recorded: Callable[[RunPointRecord], None] | None = None
     on_channel_refresh: Callable[[object], None] | None = None
     on_status_message: Callable[[str], None] | None = None
@@ -40,139 +107,64 @@ class RunResult:
 
 
 class ScanController:
-    def __init__(
-        self,
-        *,
-        wait_seconds: float = DEFAULT_WAIT_SECONDS,
-        scan_values: Sequence[int] | None = None,
-    ) -> None:
-        self.wait_seconds = float(wait_seconds)
-        self.scan_values = tuple(
-            scan_values
-            if scan_values is not None
-            else range(VTHGEM1_START_V, VTHGEM1_STOP_V + VTHGEM1_STEP_V, VTHGEM1_STEP_V)
-        )
-        self._recipes = {
-            "Reference": (
-                FieldConfig("Reference", 0.0, 0.0, False),
-            ),
-            "Collection scan": (
-                FieldConfig("Collection", 0.0, 0.0, True),
-            ),
-            "Transfer field scan": (
-                FieldConfig("Transfer -1 kV/cm", 0.0, -1.0, True),
-                FieldConfig("Transfer +1 kV/cm", 0.0, 1.0, True),
-                FieldConfig("Transfer +2 kV/cm", 0.0, 2.0, True),
-                FieldConfig("Transfer +3 kV/cm", 0.0, 3.0, True),
-            ),
-            "Drift field scan": (
-                FieldConfig("Drift 0.0 kV/cm", 0.0, 1.0, True),
-                FieldConfig("Drift 0.2 kV/cm", 0.2, 1.0, True),
-                FieldConfig("Drift 0.4 kV/cm", 0.4, 1.0, True),
-                FieldConfig("Drift 0.6 kV/cm", 0.6, 1.0, True),
-                FieldConfig("Drift 0.8 kV/cm", 0.8, 1.0, True),
-                FieldConfig("Drift 1.0 kV/cm", 1.0, 1.0, True),
-            ),
-        }
+    def preset_names(self) -> list[str]:
+        return list(PRESETS)
 
-    def mode_names(self) -> list[str]:
-        return list(self._recipes.keys())
+    def preset(self, name: str) -> ScanParameters:
+        return PRESETS[name]
 
-    def field_configs_for_mode(self, mode: str) -> tuple[FieldConfig, ...]:
-        return self._recipes[mode]
-
-    def points_per_subscan(self) -> int:
-        return len(self.scan_values)
-
-    def solve_configuration(
-        self,
-        v_thgem1_v: float,
-        e_drift_kv_cm: float,
-        e_transfer_kv_cm: float,
-    ) -> dict[str, float]:
-        t1_v = T1_ANCHOR_V
-        b1_v = max(MIN_HV_V, v_thgem1_v - t1_v)
-        c_v = max(MIN_HV_V, t1_v + e_drift_kv_cm * 1000.0 * DRIFT_GAP_CM)
-        t2_v = max(MIN_HV_V, b1_v + e_transfer_kv_cm * 1000.0 * TRANSFER_GAP_CM)
-        return {
-            "C": c_v,
-            "T1": t1_v,
-            "B1": b1_v,
-            "T2": t2_v,
-        }
-
-    def describe_mode(self, mode: str) -> str:
-        field_configs = self.field_configs_for_mode(mode)
-        fields_summary = ", ".join(
-            f"{config.label}: Edrift={config.e_drift_kv_cm:+.1f} kV/cm, "
-            f"Etransfer={config.e_transfer_kv_cm:+.1f} kV/cm"
-            for config in field_configs
-        )
-        uv_summary = "OFF" if not any(config.uv_expected for config in field_configs) else "ON"
-        return (
-            f"Vthgem1 {VTHGEM1_START_V} -> {VTHGEM1_STOP_V} V in {VTHGEM1_STEP_V} V steps | "
-            f"wait {self.wait_seconds:.0f} s/point | UV expected {uv_summary} | {fields_summary}"
-        )
-
-    def run_recipe(
+    def run_scan(
         self,
         interface: BaseCaenInterface,
-        mode: str,
+        params: ScanParameters,
         data_logger,
         callbacks: ScanCallbacks,
         abort_event: threading.Event,
     ) -> RunResult:
-        field_configs = self.field_configs_for_mode(mode)
+        field_config = params.field_config()
         interface.power_on_channels(CHANNEL_LABELS)
+        if callbacks.on_scan_started is not None:
+            callbacks.on_scan_started(params)
 
-        for field_config in field_configs:
-            if callbacks.on_subscan_started is not None:
-                callbacks.on_subscan_started(field_config)
+        for point_index, v_thgem1_v in enumerate(params.scan_values(), start=1):
+            if abort_event.is_set():
+                self._handle_abort(interface, callbacks)
+                return RunResult(False, True, "Scan aborted safely.")
 
-            for point_index, v_thgem1_v in enumerate(self.scan_values, start=1):
-                if abort_event.is_set():
-                    self._handle_abort(interface, callbacks)
-                    return RunResult(False, True, "Scan aborted safely.")
+            interface.set_measurement_context(field_config, float(v_thgem1_v))
+            interface.set_channel_voltages(params.solve(float(v_thgem1_v)))
 
-                interface.set_measurement_context(field_config, float(v_thgem1_v))
-                solved_voltages = self.solve_configuration(
-                    float(v_thgem1_v),
-                    field_config.e_drift_kv_cm,
-                    field_config.e_transfer_kv_cm,
-                )
-                interface.set_channel_voltages(solved_voltages)
+            if not self._wait_for_settle(params.wait_seconds, abort_event):
+                self._handle_abort(interface, callbacks)
+                return RunResult(False, True, "Scan aborted safely.")
 
-                if not self._wait_for_settle(abort_event):
-                    self._handle_abort(interface, callbacks)
-                    return RunResult(False, True, "Scan aborted safely.")
+            snapshots = interface.read_all_channels()
+            if callbacks.on_channel_refresh is not None:
+                callbacks.on_channel_refresh(snapshots)
 
-                snapshots = interface.read_all_channels()
-                if callbacks.on_channel_refresh is not None:
-                    callbacks.on_channel_refresh(snapshots)
+            timestamp_iso = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+            record = RunPointRecord.from_snapshots(
+                mode=params.label,
+                subscan_label=params.label,
+                uv_expected=params.uv_expected,
+                point_index=point_index,
+                v_thgem1_v=float(v_thgem1_v),
+                e_drift_kv_cm=params.drift_field_kv_cm,
+                e_transfer_kv_cm=params.induction_field_kv_cm,
+                timestamp_iso=timestamp_iso,
+                snapshots=snapshots,
+            )
+            data_logger.write_record(record)
+            if callbacks.on_point_recorded is not None:
+                callbacks.on_point_recorded(record)
 
-                timestamp_iso = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
-                record = RunPointRecord.from_snapshots(
-                    mode=mode,
-                    subscan_label=field_config.label,
-                    uv_expected=field_config.uv_expected,
-                    point_index=point_index,
-                    v_thgem1_v=float(v_thgem1_v),
-                    e_drift_kv_cm=field_config.e_drift_kv_cm,
-                    e_transfer_kv_cm=field_config.e_transfer_kv_cm,
-                    timestamp_iso=timestamp_iso,
-                    snapshots=snapshots,
-                )
-                data_logger.write_record(record)
-                if callbacks.on_point_recorded is not None:
-                    callbacks.on_point_recorded(record)
+        return RunResult(True, False, f"{params.label} scan completed.")
 
-        return RunResult(True, False, f"{mode} completed.")
-
-    def _wait_for_settle(self, abort_event: threading.Event) -> bool:
-        if self.wait_seconds <= 0:
+    def _wait_for_settle(self, wait_seconds: float, abort_event: threading.Event) -> bool:
+        if wait_seconds <= 0:
             return not abort_event.is_set()
 
-        deadline = time.monotonic() + self.wait_seconds
+        deadline = time.monotonic() + wait_seconds
         while time.monotonic() < deadline:
             if abort_event.is_set():
                 return False

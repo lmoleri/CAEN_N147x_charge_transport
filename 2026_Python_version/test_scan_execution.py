@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 
 from caen_interface import CHANNEL_LABELS, SimulationInterface
 from data_logger import DataLogger
-from scan_controller import ScanCallbacks, ScanController
+from scan_controller import ScanCallbacks, ScanController, ScanParameters
 
 
 class ScanExecutionTests(unittest.TestCase):
@@ -20,57 +20,64 @@ class ScanExecutionTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def _run_mode(self, mode: str) -> tuple[int, list]:
+    def _run(self, params: ScanParameters) -> tuple[int, list]:
         backend = SimulationInterface(seed=7)
         backend.connect()
         backend.set_ramp_rates(300.0, 300.0)
 
-        controller = ScanController(wait_seconds=0.0)
+        controller = ScanController()
         logger = DataLogger(self.output_dir)
-        csv_path = logger.open_run(mode)
-        records = []
-        callbacks = ScanCallbacks(on_point_recorded=records.append)
-
-        result = controller.run_recipe(backend, mode, logger, callbacks, threading.Event())
+        csv_path = logger.open_run(params.label)
+        records: list = []
+        result = controller.run_scan(
+            backend, params, logger, ScanCallbacks(on_point_recorded=records.append), threading.Event()
+        )
         logger.close()
 
         self.assertTrue(result.success)
         self.assertFalse(result.aborted)
-
         with csv_path.open("r", newline="", encoding="utf-8") as handle:
             row_count = sum(1 for _ in csv.DictReader(handle))
-
         return row_count, records
 
-    def test_reference_collection_transfer_and_drift_row_counts(self) -> None:
-        expected_rows = {
-            "Reference": 55,
-            "Collection scan": 55,
-            "Transfer field scan": 220,
-            "Drift field scan": 330,
-        }
-        for mode, expected in expected_rows.items():
-            with self.subTest(mode=mode):
-                row_count, records = self._run_mode(mode)
-                self.assertEqual(row_count, expected)
-                self.assertEqual(len(records), expected)
+    def test_single_curve_row_count_matches_scan_values(self) -> None:
+        params = ScanParameters(label="Custom", wait_seconds=0.0)  # 150→1500 step 25 = 55 pts
+        row_count, records = self._run(params)
+        self.assertEqual(row_count, 55)
+        self.assertEqual(len(records), 55)
+        self.assertTrue(all(record.subscan_label == "Custom" for record in records))
+
+    def test_custom_range_changes_point_count(self) -> None:
+        params = ScanParameters(
+            label="Short", vthgem1_start_v=200, vthgem1_stop_v=300, vthgem1_step_v=50, wait_seconds=0.0
+        )
+        row_count, records = self._run(params)
+        self.assertEqual(row_count, 3)  # 200, 250, 300
+        self.assertEqual(records[0].v_thgem1_v, 200.0)
+        self.assertEqual(records[-1].v_thgem1_v, 300.0)
+
+    def test_records_carry_field_settings(self) -> None:
+        params = ScanParameters(label="Fields", drift_field_kv_cm=0.4, induction_field_kv_cm=2.0, wait_seconds=0.0)
+        _, records = self._run(params)
+        self.assertAlmostEqual(records[0].e_drift_kv_cm, 0.4)
+        self.assertAlmostEqual(records[0].e_transfer_kv_cm, 2.0)
 
     def test_abort_stops_scan_and_powers_channels_off(self) -> None:
         backend = SimulationInterface(seed=11)
         backend.connect()
         backend.set_ramp_rates(300.0, 300.0)
 
-        controller = ScanController(wait_seconds=0.2)
+        controller = ScanController()
         logger = DataLogger(self.output_dir)
-        csv_path = logger.open_run("Collection scan")
+        params = ScanParameters(label="Collection", wait_seconds=0.2)
+        csv_path = logger.open_run(params.label)
         abort_event = threading.Event()
-        results = []
+        results: list = []
 
-        def run_scan() -> None:
-            result = controller.run_recipe(backend, "Collection scan", logger, ScanCallbacks(), abort_event)
-            results.append(result)
+        def run() -> None:
+            results.append(controller.run_scan(backend, params, logger, ScanCallbacks(), abort_event))
 
-        thread = threading.Thread(target=run_scan, daemon=True)
+        thread = threading.Thread(target=run, daemon=True)
         thread.start()
         time.sleep(0.1)
         abort_event.set()

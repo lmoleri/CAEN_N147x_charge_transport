@@ -32,9 +32,14 @@ A single window with three tabs:
   toggle, and `All ON`, `All OFF`, plus `Refresh Setpoints` reseed the editable boxes from the
   hardware. A footer on this tab shows the latest manual action or failure. Manual control is
   disabled while a scan runs.
-- **Scan** — pick a recipe (Reference / Collection / Transfer field / Drift field), Start/Abort, and
-  watch the live **current vs THGEM1 voltage** plots (Plotly in a Qt WebEngine view, in `μA`) with
-  a run log.
+- **Scan** — a single scan sweeps **V_THGEM1** (editable start/stop/step) while holding the
+  **drift** and **induction** fields constant; every parameter is user-set — V_THGEM1 range, drift
+  field + gap (C↔T1), induction field + gap (B1↔T2), and wait/point. The four named recipes
+  (Reference / Collection / Transfer field / Drift field) are **presets** that pre-fill those
+  fields. Start/Abort, with the live **current vs THGEM1 voltage** plot (Plotly in a Qt WebEngine
+  view, in `μA`) and a run log. Tick **Persist** to overlay successive runs on the same plot —
+  each curve is auto-legended by its `Ed`/`Ei` settings, so families of curves are built one run at
+  a time; **Clear plot** resets it.
 
 ## Run from source
 
