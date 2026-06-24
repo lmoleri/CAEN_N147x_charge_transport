@@ -7,7 +7,7 @@ import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 try:
     from serial.tools import list_ports
@@ -24,6 +24,23 @@ USB_VCP_DATA_BITS = 8
 USB_VCP_STOP_BITS = 0
 USB_VCP_PARITY = 0
 USB_VCP_BOARD_NUMBER = 0
+
+CAEN_TRANSPORT_AUTO = "Auto"
+CAEN_TRANSPORT_LIBS = "caen-libs"
+CAEN_TRANSPORT_RAW_WRAPPER = "raw wrapper"
+CAEN_TRANSPORT_OPTIONS = (
+    CAEN_TRANSPORT_AUTO,
+    CAEN_TRANSPORT_LIBS,
+    CAEN_TRANSPORT_RAW_WRAPPER,
+)
+
+CAEN_N1470_COMPATIBILITY_HINT = (
+    "N1470/N1470H support requires CAEN HV Wrapper Rel. 5.10+ "
+    "(December 2012); prefer 6.x."
+)
+CAEN_RAW_WRAPPER_HINT = (
+    "If caen-libs fails, try Transport = raw wrapper to compare against the DLL path directly."
+)
 
 PARAMETER_ALIAS_SETS = {
     "voltage_set": ("V0Set", "VSet", "VSET"),
@@ -59,6 +76,60 @@ def list_serial_ports() -> list[str]:
     return sorted(port.device for port in list_ports.comports())
 
 
+def _join_sentence_parts(parts: Sequence[str]) -> str:
+    cleaned: list[str] = []
+    for part in parts:
+        text = part.strip()
+        if text:
+            cleaned.append(text)
+    return " ".join(cleaned)
+
+
+def format_caen_connection_error(
+    *,
+    backend_label: str,
+    settings: UsbVcpSettings,
+    detail: str,
+    code: int | None = None,
+    error_text: str | None = None,
+    hints: Sequence[str] = (),
+) -> str:
+    parts = [
+        f"Failed to open CAEN N1470 on {settings.com_port} via {backend_label}.",
+        f"USB-VCP argument: {settings.build_argument()}.",
+        detail.rstrip(".") + ".",
+    ]
+    if code is not None or error_text:
+        caen_details: list[str] = []
+        if code is not None:
+            caen_details.append(f"code {code}")
+        if error_text:
+            caen_details.append(str(error_text))
+        parts.append(f"CAEN: {'; '.join(caen_details)}.")
+    for hint in hints:
+        if hint:
+            parts.append(hint.rstrip(".") + ".")
+    return _join_sentence_parts(parts)
+
+
+def format_caen_auto_connection_error(
+    settings: UsbVcpSettings, attempt_errors: Sequence[tuple[str, str]]
+) -> str:
+    attempt_summaries = [f"[{transport}] {message}" for transport, message in attempt_errors]
+    return _join_sentence_parts(
+        [
+            (
+                "Failed to open CAEN N1470 via Auto after trying "
+                f"{CAEN_TRANSPORT_LIBS} then {CAEN_TRANSPORT_RAW_WRAPPER}."
+            ),
+            f"USB-VCP argument: {settings.build_argument()}.",
+            " ".join(attempt_summaries),
+            "Use Transport = caen-libs or raw wrapper to compare the two code paths directly.",
+            CAEN_N1470_COMPATIBILITY_HINT,
+        ]
+    )
+
+
 def format_status_text(status_code: int) -> str:
     return "OK" if status_code == 0 else f"ALARM (0x{status_code:X})"
 
@@ -81,6 +152,34 @@ class FieldConfig:
     e_drift_kv_cm: float
     e_transfer_kv_cm: float
     uv_expected: bool
+
+
+@dataclass(frozen=True)
+class UsbVcpSettings:
+    com_port: str
+    transport: str = CAEN_TRANSPORT_AUTO
+    baud: int = USB_VCP_BAUD
+    data_bits: int = USB_VCP_DATA_BITS
+    stop_bits: int = USB_VCP_STOP_BITS
+    parity: int = USB_VCP_PARITY
+    board_number: int = USB_VCP_BOARD_NUMBER
+
+    def build_argument(self) -> str:
+        return CAENWrapperInterface.build_usb_vcp_argument(
+            self.com_port,
+            baud=self.baud,
+            data_bits=self.data_bits,
+            stop_bits=self.stop_bits,
+            parity=self.parity,
+            board_number=self.board_number,
+        )
+
+    def transport_order(self) -> tuple[str, ...]:
+        if self.transport == CAEN_TRANSPORT_AUTO:
+            return (CAEN_TRANSPORT_LIBS, CAEN_TRANSPORT_RAW_WRAPPER)
+        if self.transport in (CAEN_TRANSPORT_LIBS, CAEN_TRANSPORT_RAW_WRAPPER):
+            return (self.transport,)
+        raise ValueError(f"Unsupported CAEN transport: {self.transport}")
 
 
 @dataclass(frozen=True)
@@ -259,6 +358,9 @@ class BaseCaenInterface(ABC):
     def set_measurement_context(self, field_config: FieldConfig, v_thgem1_v: float) -> None:
         del field_config, v_thgem1_v
 
+    def connection_name(self) -> str:
+        return self.__class__.__name__
+
 
 class SimulationInterface(BaseCaenInterface):
     def __init__(self, seed: int | None = None) -> None:
@@ -282,6 +384,9 @@ class SimulationInterface(BaseCaenInterface):
 
     def disconnect(self) -> None:
         self._connected = False
+
+    def connection_name(self) -> str:
+        return "Simulation"
 
     def set_measurement_context(self, field_config: FieldConfig, v_thgem1_v: float) -> None:
         self._context = {
@@ -381,8 +486,19 @@ class SimulationInterface(BaseCaenInterface):
 
 
 class CAENWrapperInterface(BaseCaenInterface):
-    def __init__(self, com_port: str, dll_path: str | Path | None = None) -> None:
-        self.com_port = com_port
+    def __init__(
+        self,
+        com_port: str | None = None,
+        *,
+        settings: UsbVcpSettings | None = None,
+        dll_path: str | Path | None = None,
+    ) -> None:
+        if settings is None:
+            if not com_port:
+                raise ValueError("A COM port is required for the CAEN USB-VCP backend.")
+            settings = UsbVcpSettings(com_port=com_port)
+        self.settings = settings
+        self.com_port = settings.com_port
         self.dll_path = Path(dll_path) if dll_path else None
         self._lib: ctypes.CDLL | None = None
         self._handle: int | None = None
@@ -391,10 +507,18 @@ class CAENWrapperInterface(BaseCaenInterface):
         self._connected = False
 
     @staticmethod
-    def build_usb_vcp_argument(com_port: str) -> str:
+    def build_usb_vcp_argument(
+        com_port: str,
+        *,
+        baud: int = USB_VCP_BAUD,
+        data_bits: int = USB_VCP_DATA_BITS,
+        stop_bits: int = USB_VCP_STOP_BITS,
+        parity: int = USB_VCP_PARITY,
+        board_number: int = USB_VCP_BOARD_NUMBER,
+    ) -> str:
         return (
-            f"{com_port}_{USB_VCP_BAUD}_{USB_VCP_DATA_BITS}_"
-            f"{USB_VCP_STOP_BITS}_{USB_VCP_PARITY}_{USB_VCP_BOARD_NUMBER}"
+            f"{com_port}_{baud}_{data_bits}_"
+            f"{stop_bits}_{parity}_{board_number}"
         )
 
     @staticmethod
@@ -424,7 +548,8 @@ class CAENWrapperInterface(BaseCaenInterface):
         self._configure_library(self._lib)
 
         handle = ctypes.c_int(-1)
-        argument = self.build_usb_vcp_argument(self.com_port).encode("ascii")
+        argument_text = self.settings.build_argument()
+        argument = argument_text.encode("ascii")
         result = self._lib.CAENHV_InitSystem(
             SYSTEM_TYPE_N1470,
             LINKTYPE_USB_VCP,
@@ -434,12 +559,27 @@ class CAENWrapperInterface(BaseCaenInterface):
             ctypes.byref(handle),
         )
         self._handle = int(handle.value)
-        self._raise_on_error(result, "CAENHV_InitSystem failed")
+        if result != 0:
+            error_text = self._error_text()
+            self._reset_connection_state()
+            raise RuntimeError(
+                format_caen_connection_error(
+                    backend_label=CAEN_TRANSPORT_RAW_WRAPPER,
+                    settings=self.settings,
+                    detail="CAENHV_InitSystem failed",
+                    code=result,
+                    error_text=error_text,
+                    hints=(CAEN_N1470_COMPATIBILITY_HINT,),
+                )
+            )
 
         self._slot_index = self._resolve_slot_index()
         raw_parameter_names = self._read_parameter_names(self._slot_index, 0)
         self._parameter_names = self.resolve_parameter_names(raw_parameter_names)
         self._connected = True
+
+    def connection_name(self) -> str:
+        return "CAEN USB-VCP via raw wrapper"
 
     def disconnect(self) -> None:
         if not self._lib or self._handle is None:
@@ -751,8 +891,13 @@ class CaenLibsInterface(BaseCaenInterface):
     machines without the CAEN driver installed.
     """
 
-    def __init__(self, com_port: str) -> None:
-        self.com_port = com_port
+    def __init__(self, com_port: str | None = None, *, settings: UsbVcpSettings | None = None) -> None:
+        if settings is None:
+            if not com_port:
+                raise ValueError("A COM port is required for the CAEN USB-VCP backend.")
+            settings = UsbVcpSettings(com_port=com_port)
+        self.settings = settings
+        self.com_port = settings.com_port
         self._device = None
         self._slot: int | None = None
         self._parameter_names: dict[str, str] = {}
@@ -763,23 +908,48 @@ class CaenLibsInterface(BaseCaenInterface):
             from caen_libs import caenhvwrapper as hv
         except Exception as exc:  # pragma: no cover - driver-dependent
             raise RuntimeError(
-                "The CAEN HV Wrapper library / caen-libs is not available. Install the "
-                f"CAEN HV Wrapper (https://www.caen.it/) on this machine. ({exc})"
+                format_caen_connection_error(
+                    backend_label=CAEN_TRANSPORT_LIBS,
+                    settings=self.settings,
+                    detail="The CAEN HV Wrapper library / caen-libs is not available",
+                    error_text=str(exc),
+                    hints=(CAEN_RAW_WRAPPER_HINT, CAEN_N1470_COMPATIBILITY_HINT),
+                )
             ) from exc
 
-        argument = CAENWrapperInterface.build_usb_vcp_argument(self.com_port)
+        argument = self.settings.build_argument()
         try:
             self._device = hv.Device.open(
                 hv.SystemType.N1470, hv.LinkType.USB_VCP, argument, "admin", "admin"
             )
         except Exception as exc:  # pragma: no cover - hardware-dependent
             self._device = None
-            raise RuntimeError(f"Failed to open CAEN N1470 on {self.com_port}: {exc}") from exc
+            raise RuntimeError(
+                format_caen_connection_error(
+                    backend_label=CAEN_TRANSPORT_LIBS,
+                    settings=self.settings,
+                    detail="Device.open failed while opening SystemType.N1470 over USB_VCP",
+                    error_text=str(exc),
+                    hints=(CAEN_RAW_WRAPPER_HINT, CAEN_N1470_COMPATIBILITY_HINT),
+                )
+            ) from exc
 
-        self._slot = self._resolve_slot()
-        raw_names = self._device.get_ch_param_info(self._slot, 0)
-        self._parameter_names = CAENWrapperInterface.resolve_parameter_names(list(raw_names))
-        self._connected = True
+        try:
+            self._slot = self._resolve_slot()
+            raw_names = self._device.get_ch_param_info(self._slot, 0)
+            self._parameter_names = CAENWrapperInterface.resolve_parameter_names(list(raw_names))
+            self._connected = True
+        except Exception as exc:  # pragma: no cover - hardware-dependent
+            self.disconnect()
+            raise RuntimeError(
+                format_caen_connection_error(
+                    backend_label=CAEN_TRANSPORT_LIBS,
+                    settings=self.settings,
+                    detail="The device opened but channel metadata could not be read",
+                    error_text=str(exc),
+                    hints=(CAEN_RAW_WRAPPER_HINT, CAEN_N1470_COMPATIBILITY_HINT),
+                )
+            ) from exc
 
     def disconnect(self) -> None:
         device, self._device = self._device, None
@@ -790,6 +960,9 @@ class CaenLibsInterface(BaseCaenInterface):
                 device.close()
             except Exception:  # pragma: no cover - hardware-dependent
                 pass
+
+    def connection_name(self) -> str:
+        return "CAEN USB-VCP via caen-libs"
 
     def read_all_channels(self) -> list[ChannelSnapshot]:
         self._ensure_connected()
@@ -852,3 +1025,89 @@ class CaenLibsInterface(BaseCaenInterface):
         channels = [CHANNEL_BY_LABEL[label].channel_index for label in labels]
         if channels:
             self._device.set_ch_param(self._slot, channels, self._parameter_names["power"], value)
+
+
+class CaenUsbVcpInterface(BaseCaenInterface):
+    def __init__(
+        self,
+        settings: UsbVcpSettings,
+        *,
+        backend_factories: Mapping[str, Callable[[], BaseCaenInterface]] | None = None,
+    ) -> None:
+        self.settings = settings
+        self._backend_factories = dict(
+            backend_factories
+            or {
+                CAEN_TRANSPORT_LIBS: lambda: CaenLibsInterface(settings=settings),
+                CAEN_TRANSPORT_RAW_WRAPPER: lambda: CAENWrapperInterface(settings=settings),
+            }
+        )
+        self._backend: BaseCaenInterface | None = None
+        self._transport_in_use: str | None = None
+
+    def connect(self) -> None:
+        attempt_errors: list[tuple[str, str]] = []
+        for transport in self.settings.transport_order():
+            backend = self._make_backend(transport)
+            try:
+                backend.connect()
+            except Exception as exc:  # pragma: no cover - hardware-dependent
+                attempt_errors.append((transport, str(exc)))
+                try:
+                    backend.disconnect()
+                except Exception:
+                    pass
+                continue
+            self._backend = backend
+            self._transport_in_use = transport
+            return
+
+        if self.settings.transport == CAEN_TRANSPORT_AUTO:
+            raise RuntimeError(format_caen_auto_connection_error(self.settings, attempt_errors))
+        if attempt_errors:
+            raise RuntimeError(attempt_errors[0][1])
+        raise RuntimeError("No CAEN backend attempt was made.")
+
+    def disconnect(self) -> None:
+        backend, self._backend = self._backend, None
+        self._transport_in_use = None
+        if backend is not None:
+            backend.disconnect()
+
+    def connection_name(self) -> str:
+        if self._backend is not None:
+            return self._backend.connection_name()
+        return "CAEN USB-VCP"
+
+    def read_all_channels(self) -> list[ChannelSnapshot]:
+        return self._require_backend().read_all_channels()
+
+    def set_ramp_rates(self, ramp_up_v_s: float, ramp_down_v_s: float) -> None:
+        self._require_backend().set_ramp_rates(ramp_up_v_s, ramp_down_v_s)
+
+    def set_channel_voltages(self, voltages_by_label: Mapping[str, float]) -> None:
+        self._require_backend().set_channel_voltages(voltages_by_label)
+
+    def power_on_channels(self, labels: Sequence[str]) -> None:
+        self._require_backend().power_on_channels(labels)
+
+    def power_off_channels(self, labels: Sequence[str]) -> None:
+        self._require_backend().power_off_channels(labels)
+
+    def safe_shutdown(self, labels: Sequence[str]) -> None:
+        self._require_backend().safe_shutdown(labels)
+
+    def set_measurement_context(self, field_config: FieldConfig, v_thgem1_v: float) -> None:
+        self._require_backend().set_measurement_context(field_config, v_thgem1_v)
+
+    def _make_backend(self, transport: str) -> BaseCaenInterface:
+        try:
+            factory = self._backend_factories[transport]
+        except KeyError as exc:
+            raise RuntimeError(f"Unsupported CAEN transport: {transport}") from exc
+        return factory()
+
+    def _require_backend(self) -> BaseCaenInterface:
+        if self._backend is None:
+            raise RuntimeError("CAEN USB-VCP backend is not connected.")
+        return self._backend

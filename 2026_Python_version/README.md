@@ -11,13 +11,16 @@ Two backends:
 
 - **Simulation** — works on any OS with no hardware. Use this for teaching/demos.
 - **CAEN USB-VCP** — drives the N1470 over USB through the official **CAEN HV Wrapper** library
-  (via the `caen-libs` bindings), on the Windows lab PC.
+  on the Windows lab PC. The default **Auto** transport tries the `caen-libs` path first and
+  falls back to the raw wrapper DLL path if needed.
 
 ## Interface
 
 A single window with three tabs:
 
 - **Setup** — choose the backend (Simulation / CAEN USB-VCP) and COM port, then Connect/Disconnect.
+  For hardware, an advanced section exposes the transport mode (`Auto`, `caen-libs`, `raw wrapper`)
+  plus the USB-VCP tuple fields (baud, data bits, stop bits, parity, board number).
 - **Channels** — a live grid for the four channels (C, T1, B1, T2): VMon, IMon, colour-coded status,
   plus **manual control** — an editable **VSet** (applies on Enter / focus-out), a per-channel
   **Power** toggle, and **All ON / All OFF**. Manual control is disabled while a scan runs.
@@ -67,10 +70,24 @@ This creates a venv, installs dependencies, and runs PyInstaller against
    <https://www.caen.it/products/caen-hv-wrapper-library/>). `caen-libs` loads it automatically —
    no DLL needs to be copied next to the exe.
 2. Connect the N1470 over USB and note its COM port.
-3. In the *Setup* tab choose backend **CAEN USB-VCP**, select the COM port, and **Connect**.
+3. In the *Setup* tab choose backend **CAEN USB-VCP**, select the COM port, leave transport on
+   **Auto**, and **Connect**.
 
 > The hardware backend is exercised on the lab PC (it needs the N1470 + the CAEN HV Wrapper).
 > Simulation covers everything else, including CI and development.
+
+## CAEN troubleshooting
+
+- **N1470H is still treated as `N1470`** by the CAEN HV Wrapper path in this app. The `H` suffix
+  does not currently map to a separate wrapper system type.
+- Install **CAEN HV Wrapper Rel. 5.10 or newer** on the Windows lab PC. N1470 support was added in
+  Rel. 5.10 (December 2012); **6.x is preferred**.
+- If **Auto** fails, force **Transport = caen-libs** and then **Transport = raw wrapper** to compare
+  the two code paths directly.
+- Keep the default USB-VCP tuple unless you are matching a known-working legacy setup:
+  `COM_115200_8_0_0_0`.
+- Connection failures now include the backend attempted and the exact USB-VCP argument string, which
+  makes it easier to compare this GUI against an older working setup.
 
 ## Where measurements are saved
 

@@ -8,13 +8,20 @@ from pathlib import Path
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from caen_interface import (
+    CAEN_TRANSPORT_OPTIONS,
     CHANNEL_DEFINITIONS,
     CHANNEL_LABELS,
     BaseCaenInterface,
-    CaenLibsInterface,
+    CaenUsbVcpInterface,
     ChannelSnapshot,
     FieldConfig,
     SimulationInterface,
+    USB_VCP_BAUD,
+    USB_VCP_BOARD_NUMBER,
+    USB_VCP_DATA_BITS,
+    USB_VCP_PARITY,
+    USB_VCP_STOP_BITS,
+    UsbVcpSettings,
     list_serial_ports,
 )
 from data_logger import DataLogger
@@ -42,8 +49,8 @@ class ScanWorker(QtCore.QObject):
         self.abort_event = threading.Event()
         self.scan_active = False
 
-    @QtCore.pyqtSlot(str, str)
-    def connect_backend(self, backend_name: str, com_port: str) -> None:
+    @QtCore.pyqtSlot(str, object)
+    def connect_backend(self, backend_name: str, connection_settings: object) -> None:
         if self.scan_active:
             self.error.emit("Cannot connect while a scan is running.")
             return
@@ -55,7 +62,9 @@ class ScanWorker(QtCore.QObject):
             if backend_name == "Simulation":
                 backend = SimulationInterface()
             elif backend_name == "CAEN USB-VCP":
-                backend = CaenLibsInterface(com_port=com_port)
+                if not isinstance(connection_settings, UsbVcpSettings):
+                    raise RuntimeError("Missing CAEN USB-VCP connection settings.")
+                backend = CaenUsbVcpInterface(connection_settings)
             else:
                 raise RuntimeError(f"Unsupported backend: {backend_name}")
 
@@ -63,9 +72,9 @@ class ScanWorker(QtCore.QObject):
             backend.connect()
             backend.set_ramp_rates(300.0, 300.0)
             self.backend = backend
-            self.backend_name = backend_name
+            self.backend_name = backend.connection_name()
             snapshots = backend.read_all_channels()
-            self.connected.emit(True, f"Connected to {backend_name}.", snapshots)
+            self.connected.emit(True, f"Connected to {backend.connection_name()}.", snapshots)
         except Exception as exc:  # pragma: no cover - hardware-dependent
             self.backend = None
             self.backend_name = ""
@@ -183,7 +192,7 @@ class ScanWorker(QtCore.QObject):
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    connect_requested = QtCore.pyqtSignal(str, str)
+    connect_requested = QtCore.pyqtSignal(str, object)
     disconnect_requested = QtCore.pyqtSignal()
     refresh_requested = QtCore.pyqtSignal()
     start_scan_requested = QtCore.pyqtSignal(str)
@@ -274,6 +283,55 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.backend_hint_label.setWordWrap(True)
 
+        self.hardware_settings_group = QtWidgets.QGroupBox("Advanced hardware settings")
+        hardware_layout = QtWidgets.QGridLayout(self.hardware_settings_group)
+
+        self.transport_combo = QtWidgets.QComboBox()
+        self.transport_combo.addItems(list(CAEN_TRANSPORT_OPTIONS))
+
+        self.board_number_spin = QtWidgets.QSpinBox()
+        self.board_number_spin.setRange(0, 31)
+        self.board_number_spin.setValue(USB_VCP_BOARD_NUMBER)
+
+        self.baud_spin = QtWidgets.QSpinBox()
+        self.baud_spin.setRange(300, 921600)
+        self.baud_spin.setValue(USB_VCP_BAUD)
+        self.baud_spin.setSingleStep(300)
+
+        self.data_bits_spin = QtWidgets.QSpinBox()
+        self.data_bits_spin.setRange(5, 8)
+        self.data_bits_spin.setValue(USB_VCP_DATA_BITS)
+
+        self.stop_bits_spin = QtWidgets.QSpinBox()
+        self.stop_bits_spin.setRange(0, 2)
+        self.stop_bits_spin.setValue(USB_VCP_STOP_BITS)
+
+        self.parity_spin = QtWidgets.QSpinBox()
+        self.parity_spin.setRange(0, 4)
+        self.parity_spin.setValue(USB_VCP_PARITY)
+
+        self.hardware_hint_label = QtWidgets.QLabel(
+            "USB-VCP tuple: COM_baud_data_stop_parity_board. Keep the defaults unless "
+            "you are matching a known-working legacy setup."
+        )
+        self.hardware_hint_label.setWordWrap(True)
+
+        hardware_layout.addWidget(QtWidgets.QLabel("Transport"), 0, 0)
+        hardware_layout.addWidget(self.transport_combo, 0, 1)
+        hardware_layout.addWidget(QtWidgets.QLabel("Board"), 0, 2)
+        hardware_layout.addWidget(self.board_number_spin, 0, 3)
+        hardware_layout.addWidget(QtWidgets.QLabel("Baud"), 1, 0)
+        hardware_layout.addWidget(self.baud_spin, 1, 1)
+        hardware_layout.addWidget(QtWidgets.QLabel("Data bits"), 1, 2)
+        hardware_layout.addWidget(self.data_bits_spin, 1, 3)
+        hardware_layout.addWidget(QtWidgets.QLabel("Stop bits"), 2, 0)
+        hardware_layout.addWidget(self.stop_bits_spin, 2, 1)
+        hardware_layout.addWidget(QtWidgets.QLabel("Parity"), 2, 2)
+        hardware_layout.addWidget(self.parity_spin, 2, 3)
+        hardware_layout.addWidget(self.hardware_hint_label, 3, 0, 1, 4)
+        hardware_layout.setColumnStretch(1, 1)
+        hardware_layout.setColumnStretch(3, 1)
+
         layout.addWidget(QtWidgets.QLabel("Backend"), 0, 0)
         layout.addWidget(self.backend_combo, 0, 1)
         layout.addWidget(self.com_label, 0, 2)
@@ -282,6 +340,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.connect_button, 0, 5)
         layout.addWidget(self.disconnect_button, 0, 6)
         layout.addWidget(self.backend_hint_label, 1, 0, 1, 7)
+        layout.addWidget(self.hardware_settings_group, 2, 0, 1, 7)
         layout.setColumnStretch(1, 1)
         layout.setColumnStretch(3, 1)
         return group
@@ -421,6 +480,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.com_label.setVisible(is_hardware)
         self.com_combo.setVisible(is_hardware)
         self.refresh_ports_button.setVisible(is_hardware)
+        self.hardware_settings_group.setVisible(is_hardware)
 
     def _populate_serial_ports(self) -> None:
         current_text = self.com_combo.currentText()
@@ -440,8 +500,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _queue_connect(self) -> None:
         backend_name = self.backend_combo.currentText()
-        com_port = self.com_combo.currentText().strip()
-        self.connect_requested.emit(backend_name, com_port)
+        settings = None
+        if backend_name == "CAEN USB-VCP":
+            settings = self._current_usb_vcp_settings()
+        self.connect_requested.emit(backend_name, settings)
 
     def _queue_disconnect(self) -> None:
         self.disconnect_requested.emit()
@@ -569,6 +631,17 @@ class MainWindow(QtWidgets.QMainWindow):
         timestamp = QtCore.QDateTime.currentDateTime().toString("HH:mm:ss")
         self.log_view.appendPlainText(f"[{timestamp}] {message}")
 
+    def _current_usb_vcp_settings(self) -> UsbVcpSettings:
+        return UsbVcpSettings(
+            com_port=self.com_combo.currentText().strip(),
+            transport=self.transport_combo.currentText(),
+            baud=int(self.baud_spin.value()),
+            data_bits=int(self.data_bits_spin.value()),
+            stop_bits=int(self.stop_bits_spin.value()),
+            parity=int(self.parity_spin.value()),
+            board_number=int(self.board_number_spin.value()),
+        )
+
     def _set_connection_state(self, connected: bool) -> None:
         self.connected_backend = connected
         self.connect_button.setEnabled(not connected and not self.scan_running)
@@ -577,6 +650,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.backend_combo.setEnabled(not connected and not self.scan_running)
         self.com_combo.setEnabled(not connected and not self.scan_running)
         self.refresh_ports_button.setEnabled(not connected and not self.scan_running)
+        self.transport_combo.setEnabled(not connected and not self.scan_running)
+        self.board_number_spin.setEnabled(not connected and not self.scan_running)
+        self.baud_spin.setEnabled(not connected and not self.scan_running)
+        self.data_bits_spin.setEnabled(not connected and not self.scan_running)
+        self.stop_bits_spin.setEnabled(not connected and not self.scan_running)
+        self.parity_spin.setEnabled(not connected and not self.scan_running)
         self.mode_combo.setEnabled(not self.scan_running)
         self._set_manual_controls_enabled(connected and not self.scan_running)
         self._on_backend_selection_changed()
@@ -590,6 +669,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.backend_combo.setEnabled(not self.connected_backend and not running)
         self.com_combo.setEnabled(not self.connected_backend and not running)
         self.refresh_ports_button.setEnabled(not self.connected_backend and not running)
+        self.transport_combo.setEnabled(not self.connected_backend and not running)
+        self.board_number_spin.setEnabled(not self.connected_backend and not running)
+        self.baud_spin.setEnabled(not self.connected_backend and not running)
+        self.data_bits_spin.setEnabled(not self.connected_backend and not running)
+        self.stop_bits_spin.setEnabled(not self.connected_backend and not running)
+        self.parity_spin.setEnabled(not self.connected_backend and not running)
         self.mode_combo.setEnabled(not running)
         self._set_manual_controls_enabled(self.connected_backend and not running)
 

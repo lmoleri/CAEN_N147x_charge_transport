@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 
 from PyQt5 import QtWidgets
 
-from caen_interface import CHANNEL_LABELS, ChannelSnapshot
+from caen_interface import CHANNEL_LABELS, CAEN_TRANSPORT_RAW_WRAPPER, ChannelSnapshot, UsbVcpSettings
 from main_window import MainWindow
 
 
@@ -62,11 +62,37 @@ class MainWindowTabbedShellTests(unittest.TestCase):
         self.assertFalse(self.window.channel_cells["C"]["power"].isEnabled())
         self.assertFalse(self.window.all_on_button.isEnabled())
 
+    def test_hardware_settings_defaults_match_usb_vcp_defaults(self) -> None:
+        self.window.backend_combo.setCurrentText("CAEN USB-VCP")
+
+        settings = self.window._current_usb_vcp_settings()
+
+        self.assertIsInstance(settings, UsbVcpSettings)
+        self.assertEqual(settings.transport, "Auto")
+        self.assertEqual(settings.build_argument(), "COM1_115200_8_0_0_0")
+
+    def test_hardware_settings_collect_custom_serial_tuple(self) -> None:
+        self.window.backend_combo.setCurrentText("CAEN USB-VCP")
+        self.window.com_combo.clear()
+        self.window.com_combo.addItem("COM9")
+        self.window.com_combo.setCurrentText("COM9")
+        self.window.transport_combo.setCurrentText(CAEN_TRANSPORT_RAW_WRAPPER)
+        self.window.board_number_spin.setValue(2)
+        self.window.baud_spin.setValue(57600)
+        self.window.data_bits_spin.setValue(7)
+        self.window.stop_bits_spin.setValue(2)
+        self.window.parity_spin.setValue(1)
+
+        settings = self.window._current_usb_vcp_settings()
+
+        self.assertEqual(settings.transport, CAEN_TRANSPORT_RAW_WRAPPER)
+        self.assertEqual(settings.build_argument(), "COM9_57600_7_2_1_2")
+
     def test_worker_manual_control_applies_to_simulation_backend(self) -> None:
         from main_window import ScanWorker
 
         worker = ScanWorker(Path(self._tmp.name))
-        worker.connect_backend("Simulation", "")
+        worker.connect_backend("Simulation", None)
         self.assertIsNotNone(worker.backend)
 
         worker.set_channel_voltage("C", 234.0)
