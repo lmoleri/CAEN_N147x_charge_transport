@@ -9,7 +9,7 @@ from caen_interface import (
     CHANNEL_DEFINITIONS,
     CHANNEL_LABELS,
     BaseCaenInterface,
-    CAENWrapperInterface,
+    CaenLibsInterface,
     ChannelSnapshot,
     FieldConfig,
     SimulationInterface,
@@ -53,8 +53,7 @@ class ScanWorker(QtCore.QObject):
             if backend_name == "Simulation":
                 backend = SimulationInterface()
             elif backend_name == "CAEN USB-VCP":
-                dll_path = self.base_dir / "CAENHVWrapper.dll"
-                backend = CAENWrapperInterface(com_port=com_port, dll_path=dll_path if dll_path.exists() else None)
+                backend = CaenLibsInterface(com_port=com_port)
             else:
                 raise RuntimeError(f"Unsupported backend: {backend_name}")
 
@@ -227,7 +226,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.disconnect_button.clicked.connect(self._queue_disconnect)
 
         self.backend_hint_label = QtWidgets.QLabel(
-            "Simulation works everywhere. CAEN USB-VCP expects CAENHVWrapper.dll on Windows."
+            "Simulation works everywhere. CAEN USB-VCP uses the CAEN HV Wrapper library "
+            "(install it from caen.it on the Windows lab PC)."
         )
         self.backend_hint_label.setWordWrap(True)
 

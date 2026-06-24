@@ -737,3 +737,118 @@ class CAENWrapperInterface(BaseCaenInterface):
                 )
             )
         return snapshots
+
+
+class CaenLibsInterface(BaseCaenInterface):
+    """CAEN N1470 over USB-VCP using the official ``caen-libs`` (CAEN HV Wrapper)
+    Python bindings.
+
+    Same parameter model as :class:`CAENWrapperInterface` (it reuses the static
+    helpers below), but talks to the device through ``caen-libs`` instead of a
+    hand-rolled ctypes wrapper. ``caen-libs`` loads the native CAEN HV Wrapper
+    library at import time, so it is imported lazily inside :meth:`connect` — the
+    rest of the app, the Simulation backend, and the tests stay importable on
+    machines without the CAEN driver installed.
+    """
+
+    def __init__(self, com_port: str) -> None:
+        self.com_port = com_port
+        self._device = None
+        self._slot: int | None = None
+        self._parameter_names: dict[str, str] = {}
+        self._connected = False
+
+    def connect(self) -> None:
+        try:
+            from caen_libs import caenhvwrapper as hv
+        except Exception as exc:  # pragma: no cover - driver-dependent
+            raise RuntimeError(
+                "The CAEN HV Wrapper library / caen-libs is not available. Install the "
+                f"CAEN HV Wrapper (https://www.caen.it/) on this machine. ({exc})"
+            ) from exc
+
+        argument = CAENWrapperInterface.build_usb_vcp_argument(self.com_port)
+        try:
+            self._device = hv.Device.open(
+                hv.SystemType.N1470, hv.LinkType.USB_VCP, argument, "admin", "admin"
+            )
+        except Exception as exc:  # pragma: no cover - hardware-dependent
+            self._device = None
+            raise RuntimeError(f"Failed to open CAEN N1470 on {self.com_port}: {exc}") from exc
+
+        self._slot = self._resolve_slot()
+        raw_names = self._device.get_ch_param_info(self._slot, 0)
+        self._parameter_names = CAENWrapperInterface.resolve_parameter_names(list(raw_names))
+        self._connected = True
+
+    def disconnect(self) -> None:
+        device, self._device = self._device, None
+        self._slot = None
+        self._connected = False
+        if device is not None:
+            try:
+                device.close()
+            except Exception:  # pragma: no cover - hardware-dependent
+                pass
+
+    def read_all_channels(self) -> list[ChannelSnapshot]:
+        self._ensure_connected()
+        channels = self._channel_indices()
+        voltages = self._get_floats("voltage_monitor", channels)
+        currents = self._get_floats("current_monitor", channels)
+        powers = self._get_ints("power", channels)
+        statuses = self._get_ints("status", channels)
+        # build_snapshots is self-independent; reuse the CAENWrapperInterface impl.
+        return CAENWrapperInterface.build_snapshots(self, voltages, currents, powers, statuses)
+
+    def set_ramp_rates(self, ramp_up_v_s: float, ramp_down_v_s: float) -> None:
+        self._ensure_connected()
+        channels = self._channel_indices()
+        self._device.set_ch_param(self._slot, channels, self._parameter_names["ramp_up"], float(ramp_up_v_s))
+        self._device.set_ch_param(self._slot, channels, self._parameter_names["ramp_down"], float(ramp_down_v_s))
+
+    def set_channel_voltages(self, voltages_by_label: Mapping[str, float]) -> None:
+        self._ensure_connected()
+        name = self._parameter_names["voltage_set"]
+        for label, voltage_v in voltages_by_label.items():
+            channel_index = CHANNEL_BY_LABEL[label].channel_index
+            self._device.set_ch_param(self._slot, [channel_index], name, float(voltage_v))
+
+    def power_on_channels(self, labels: Sequence[str]) -> None:
+        self._set_power(labels, 1)
+
+    def power_off_channels(self, labels: Sequence[str]) -> None:
+        self._set_power(labels, 0)
+
+    def safe_shutdown(self, labels: Sequence[str]) -> None:
+        self._ensure_connected()
+        self.set_channel_voltages({label: 1.0 for label in labels})
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+    def _resolve_slot(self) -> int:
+        for board in self._device.get_crate_map():
+            if board is not None:
+                return int(board.slot)
+        raise RuntimeError("No CAEN board found in the crate map.")
+
+    def _ensure_connected(self) -> None:
+        if not self._connected or self._device is None or self._slot is None:
+            raise RuntimeError("CAEN device is not connected.")
+
+    @staticmethod
+    def _channel_indices() -> list[int]:
+        return [channel.channel_index for channel in CHANNEL_DEFINITIONS]
+
+    def _get_floats(self, semantic: str, channels: Sequence[int]) -> list[float]:
+        values = self._device.get_ch_param(self._slot, list(channels), self._parameter_names[semantic])
+        return [float(v) for v in values]
+
+    def _get_ints(self, semantic: str, channels: Sequence[int]) -> list[int]:
+        values = self._device.get_ch_param(self._slot, list(channels), self._parameter_names[semantic])
+        return [int(v) for v in values]
+
+    def _set_power(self, labels: Sequence[str], value: int) -> None:
+        self._ensure_connected()
+        channels = [CHANNEL_BY_LABEL[label].channel_index for label in labels]
+        if channels:
+            self._device.set_ch_param(self._slot, channels, self._parameter_names["power"], value)
