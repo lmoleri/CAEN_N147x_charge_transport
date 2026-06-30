@@ -24,6 +24,7 @@ from caen_interface import (
     status_color_hex,
 )
 from main_window import MainWindow
+from scan_controller import ScanVariable
 
 
 class MainWindowTabbedShellTests(unittest.TestCase):
@@ -163,6 +164,27 @@ class MainWindowTabbedShellTests(unittest.TestCase):
         self.assertFalse(self.window._refresh_in_flight)
         self.window._queue_refresh()
         self.assertEqual(len(emitted), 2)
+
+    def test_scan_tab_lists_three_programs(self) -> None:
+        programs = [self.window.program_combo.itemText(i) for i in range(self.window.program_combo.count())]
+        self.assertEqual(programs, ["THGEM voltage (gain)", "Drift field scan", "Induction field scan"])
+
+    def test_thgem_program_sweeps_voltage_and_disables_held_voltage(self) -> None:
+        self.window.program_combo.setCurrentText("THGEM voltage (gain)")
+        self.assertIs(self.window._current_scan_variable(), ScanVariable.THGEM_VOLTAGE)
+        self.assertEqual(self.window.sweep_start_spin.suffix(), " V")
+        self.assertFalse(self.window.vhold_spin.isEnabled())  # V_THGEM1 is swept
+        self.assertTrue(self.window.drift_field_spin.isEnabled())  # held -> editable
+
+    def test_drift_program_sets_kv_units_and_disables_drift_hold(self) -> None:
+        self.window.program_combo.setCurrentText("Drift field scan")
+        self.assertEqual(self.window.sweep_start_spin.suffix(), " kV/cm")
+        self.assertEqual(self.window.sweep_start_label.text(), "E_drift start")
+        self.assertFalse(self.window.drift_field_spin.isEnabled())  # E_drift is swept
+        self.assertTrue(self.window.vhold_spin.isEnabled())  # held -> editable
+        params = self.window._current_scan_parameters()
+        self.assertIs(params.scan_variable, ScanVariable.DRIFT_FIELD)
+        self.assertEqual(params.label, "Drift field scan")
 
     def test_hardware_settings_defaults_match_usb_vcp_defaults(self) -> None:
         self.window.backend_combo.setCurrentText("CAEN USB-VCP")

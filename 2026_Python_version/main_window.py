@@ -42,12 +42,15 @@ from scan_controller import (
     DEFAULT_WAIT_SECONDS,
     DRIFT_GAP_CM,
     INDUCTION_GAP_CM,
+    SCAN_VARIABLE_SPECS,
+    VTHGEM1_HOLD_V,
     VTHGEM1_START_V,
     VTHGEM1_STEP_V,
     VTHGEM1_STOP_V,
     ScanCallbacks,
     ScanController,
     ScanParameters,
+    ScanVariable,
 )
 
 
@@ -432,11 +435,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_scan_group(self) -> QtWidgets.QGroupBox:
         group = QtWidgets.QGroupBox("Scan Control")
         layout = QtWidgets.QGridLayout(group)
-        self._loading_preset = False
+        self._loading_program = False
 
-        self.preset_combo = QtWidgets.QComboBox()
-        self.preset_combo.addItem("Custom")
-        self.preset_combo.addItems(self.controller.preset_names())
+        self.program_combo = QtWidgets.QComboBox()
+        self.program_combo.addItems(self.controller.preset_names())
 
         def _spin(minimum, maximum, decimals, step, value, suffix):
             box = QtWidgets.QDoubleSpinBox()
@@ -448,17 +450,22 @@ class MainWindow(QtWidgets.QMainWindow):
             box.setValue(value)
             return box
 
-        self.vstart_spin = _spin(0.0, 5000.0, 0, 25.0, VTHGEM1_START_V, " V")
-        self.vstop_spin = _spin(0.0, 5000.0, 0, 25.0, VTHGEM1_STOP_V, " V")
-        self.vstep_spin = _spin(1.0, 1000.0, 0, 5.0, VTHGEM1_STEP_V, " V")
+        # Sweep range — units/range/labels are reconfigured per program.
+        self.sweep_start_spin = _spin(0.0, 5000.0, 0, 25.0, VTHGEM1_START_V, " V")
+        self.sweep_stop_spin = _spin(0.0, 5000.0, 0, 25.0, VTHGEM1_STOP_V, " V")
+        self.sweep_step_spin = _spin(1.0, 1000.0, 0, 5.0, VTHGEM1_STEP_V, " V")
         self.wait_spin = _spin(0.0, 600.0, 1, 0.5, DEFAULT_WAIT_SECONDS, " s")
+        # Held values for the two quantities not being swept (the swept one's box
+        # is auto-disabled by _apply_held_enabled).
+        self.vhold_spin = _spin(0.0, 5000.0, 0, 25.0, VTHGEM1_HOLD_V, " V")
         self.drift_field_spin = _spin(-50.0, 50.0, 2, 0.1, 0.0, " kV/cm")
         self.drift_gap_spin = _spin(0.01, 100.0, 2, 0.1, DRIFT_GAP_CM, " cm")
         self.induction_field_spin = _spin(-50.0, 50.0, 2, 0.1, 1.0, " kV/cm")
         self.induction_gap_spin = _spin(0.01, 100.0, 2, 0.05, INDUCTION_GAP_CM, " cm")
         self._scan_spins = (
-            self.vstart_spin, self.vstop_spin, self.vstep_spin, self.wait_spin,
-            self.drift_field_spin, self.drift_gap_spin, self.induction_field_spin, self.induction_gap_spin,
+            self.sweep_start_spin, self.sweep_stop_spin, self.sweep_step_spin, self.wait_spin,
+            self.vhold_spin, self.drift_field_spin, self.drift_gap_spin,
+            self.induction_field_spin, self.induction_gap_spin,
         )
 
         self.uv_check = QtWidgets.QCheckBox("UV lamp ON (recorded as metadata)")
@@ -471,9 +478,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.output_path_label = QtWidgets.QLabel(f"CSV output: {self.base_dir / 'measurements'}")
         self.output_path_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
 
+        # Relabelled per program (symbol + unit follow the swept variable).
+        self.sweep_start_label = QtWidgets.QLabel("Sweep start")
+        self.sweep_stop_label = QtWidgets.QLabel("stop")
+        self.sweep_step_label = QtWidgets.QLabel("Sweep step")
+
         # Wire signals only after every widget exists, so the setValue() calls
         # above (during construction) cannot fire the change handlers.
-        self.preset_combo.currentTextChanged.connect(self._on_preset_selected)
+        self.program_combo.currentTextChanged.connect(self._on_program_selected)
         for box in self._scan_spins:
             box.valueChanged.connect(self._on_scan_param_changed)
         self.uv_check.toggled.connect(self._on_scan_param_changed)
@@ -481,20 +493,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.abort_button.clicked.connect(self._request_abort)
 
         r = 0
-        layout.addWidget(QtWidgets.QLabel("Preset"), r, 0)
-        layout.addWidget(self.preset_combo, r, 1)
+        layout.addWidget(QtWidgets.QLabel("Scan program"), r, 0)
+        layout.addWidget(self.program_combo, r, 1)
         layout.addWidget(self.start_button, r, 2)
         layout.addWidget(self.abort_button, r, 3)
         r += 1
-        layout.addWidget(QtWidgets.QLabel("V_THGEM1 start"), r, 0)
-        layout.addWidget(self.vstart_spin, r, 1)
-        layout.addWidget(QtWidgets.QLabel("stop"), r, 2)
-        layout.addWidget(self.vstop_spin, r, 3)
+        layout.addWidget(self.sweep_start_label, r, 0)
+        layout.addWidget(self.sweep_start_spin, r, 1)
+        layout.addWidget(self.sweep_stop_label, r, 2)
+        layout.addWidget(self.sweep_stop_spin, r, 3)
         r += 1
-        layout.addWidget(QtWidgets.QLabel("V_THGEM1 step"), r, 0)
-        layout.addWidget(self.vstep_spin, r, 1)
+        layout.addWidget(self.sweep_step_label, r, 0)
+        layout.addWidget(self.sweep_step_spin, r, 1)
         layout.addWidget(QtWidgets.QLabel("Wait / point"), r, 2)
         layout.addWidget(self.wait_spin, r, 3)
+        r += 1
+        layout.addWidget(QtWidgets.QLabel("V_THGEM1 (held)"), r, 0)
+        layout.addWidget(self.vhold_spin, r, 1)
         r += 1
         layout.addWidget(QtWidgets.QLabel("Drift field"), r, 0)
         layout.addWidget(self.drift_field_spin, r, 1)
@@ -513,6 +528,8 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.output_path_label, r, 0, 1, 4)
         layout.setColumnStretch(1, 1)
         layout.setColumnStretch(3, 1)
+
+        self._on_program_selected(self.program_combo.currentText())
         return group
 
     def _build_channels_tab(self) -> QtWidgets.QWidget:
@@ -717,16 +734,21 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.com_combo.addItem("COM1")
 
+    def _current_scan_variable(self) -> ScanVariable:
+        return self.controller.preset(self.program_combo.currentText()).scan_variable
+
     def _current_scan_parameters(self) -> ScanParameters:
         return ScanParameters(
-            label=self.preset_combo.currentText(),
-            vthgem1_start_v=self.vstart_spin.value(),
-            vthgem1_stop_v=self.vstop_spin.value(),
-            vthgem1_step_v=self.vstep_spin.value(),
-            drift_gap_cm=self.drift_gap_spin.value(),
+            label=self.program_combo.currentText(),
+            scan_variable=self._current_scan_variable(),
+            start=self.sweep_start_spin.value(),
+            stop=self.sweep_stop_spin.value(),
+            step=self.sweep_step_spin.value(),
+            v_thgem1_v=self.vhold_spin.value(),
             drift_field_kv_cm=self.drift_field_spin.value(),
-            induction_gap_cm=self.induction_gap_spin.value(),
             induction_field_kv_cm=self.induction_field_spin.value(),
+            drift_gap_cm=self.drift_gap_spin.value(),
+            induction_gap_cm=self.induction_gap_spin.value(),
             wait_seconds=self.wait_spin.value(),
             uv_expected=self.uv_check.isChecked(),
         )
@@ -734,38 +756,74 @@ class MainWindow(QtWidgets.QMainWindow):
     def _update_scan_summary(self) -> None:
         self.scan_summary_label.setText(self._current_scan_parameters().describe())
 
-    def _on_preset_selected(self, name: str) -> None:
-        if name and name != "Custom":
-            params = self.controller.preset(name)
-            self._loading_preset = True
-            try:
-                self.vstart_spin.setValue(params.vthgem1_start_v)
-                self.vstop_spin.setValue(params.vthgem1_stop_v)
-                self.vstep_spin.setValue(params.vthgem1_step_v)
-                self.wait_spin.setValue(params.wait_seconds)
-                self.drift_field_spin.setValue(params.drift_field_kv_cm)
-                self.drift_gap_spin.setValue(params.drift_gap_cm)
-                self.induction_field_spin.setValue(params.induction_field_kv_cm)
-                self.induction_gap_spin.setValue(params.induction_gap_cm)
-                self.uv_check.setChecked(params.uv_expected)
-            finally:
-                self._loading_preset = False
+    def _configure_sweep_spins(self, scan_variable: ScanVariable) -> None:
+        """Retarget the sweep boxes to the program's units/range and relabel them."""
+        spec = SCAN_VARIABLE_SPECS[scan_variable]
+        if scan_variable is ScanVariable.THGEM_VOLTAGE:
+            for box in (self.sweep_start_spin, self.sweep_stop_spin):
+                box.setRange(0.0, 5000.0)
+                box.setDecimals(0)
+                box.setSingleStep(25.0)
+                box.setSuffix(" V")
+            self.sweep_step_spin.setRange(1.0, 1000.0)
+            self.sweep_step_spin.setDecimals(0)
+            self.sweep_step_spin.setSingleStep(5.0)
+            self.sweep_step_spin.setSuffix(" V")
+        else:  # a field, in kV/cm
+            for box in (self.sweep_start_spin, self.sweep_stop_spin):
+                box.setRange(-50.0, 50.0)
+                box.setDecimals(2)
+                box.setSingleStep(0.1)
+                box.setSuffix(" kV/cm")
+            self.sweep_step_spin.setRange(0.01, 50.0)
+            self.sweep_step_spin.setDecimals(2)
+            self.sweep_step_spin.setSingleStep(0.05)
+            self.sweep_step_spin.setSuffix(" kV/cm")
+        self.sweep_start_label.setText(f"{spec.symbol} start")
+        self.sweep_step_label.setText(f"{spec.symbol} step")
+
+    def _apply_held_enabled(self) -> None:
+        """Grey out the held box of whatever quantity the program sweeps."""
+        base = not self.scan_running
+        var = self._current_scan_variable()
+        self.vhold_spin.setEnabled(base and var is not ScanVariable.THGEM_VOLTAGE)
+        self.drift_field_spin.setEnabled(base and var is not ScanVariable.DRIFT_FIELD)
+        self.induction_field_spin.setEnabled(base and var is not ScanVariable.INDUCTION_FIELD)
+
+    def _on_program_selected(self, name: str) -> None:
+        if not name:
+            return
+        params = self.controller.preset(name)
+        self._loading_program = True
+        try:
+            self._configure_sweep_spins(params.scan_variable)
+            self.sweep_start_spin.setValue(params.start)
+            self.sweep_stop_spin.setValue(params.stop)
+            self.sweep_step_spin.setValue(params.step)
+            self.wait_spin.setValue(params.wait_seconds)
+            self.vhold_spin.setValue(params.v_thgem1_v)
+            self.drift_field_spin.setValue(params.drift_field_kv_cm)
+            self.drift_gap_spin.setValue(params.drift_gap_cm)
+            self.induction_field_spin.setValue(params.induction_field_kv_cm)
+            self.induction_gap_spin.setValue(params.induction_gap_cm)
+            self.uv_check.setChecked(params.uv_expected)
+        finally:
+            self._loading_program = False
+        self._apply_held_enabled()
         self._update_scan_summary()
 
     def _on_scan_param_changed(self, *_args) -> None:
-        if self._loading_preset:
+        if self._loading_program:
             return
-        if self.preset_combo.currentText() != "Custom":
-            self.preset_combo.blockSignals(True)
-            self.preset_combo.setCurrentText("Custom")
-            self.preset_combo.blockSignals(False)
         self._update_scan_summary()
 
     def _set_scan_inputs_enabled(self, enabled: bool) -> None:
-        self.preset_combo.setEnabled(enabled)
+        self.program_combo.setEnabled(enabled)
         self.uv_check.setEnabled(enabled)
         for box in self._scan_spins:
             box.setEnabled(enabled)
+        if enabled:
+            self._apply_held_enabled()
 
     def _queue_connect(self) -> None:
         backend_name = self.backend_combo.currentText()

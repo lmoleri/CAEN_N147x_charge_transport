@@ -10,30 +10,66 @@ from PyQt5 import QtWidgets
 from caen_interface import CHANNEL_LABELS, SimulationInterface
 from data_logger import DataLogger
 from plotly_view import PlotlyViewer, series_from_csv
-from scan_controller import ScanCallbacks, ScanController, ScanParameters
+from scan_controller import ScanCallbacks, ScanController, ScanParameters, ScanVariable
+
+
+def _run_to_csv(td: str, params: ScanParameters) -> Path:
+    backend = SimulationInterface(seed=7)
+    backend.connect()
+    backend.set_ramp_rates(300.0, 300.0)
+    logger = DataLogger(Path(td))
+    csv_path = logger.open_run(params.label)
+    ScanController().run_scan(backend, params, logger, ScanCallbacks(), threading.Event())
+    logger.close()
+    return csv_path
 
 
 class SeriesFromCsvTests(unittest.TestCase):
-    def test_parses_scan_csv_into_per_channel_series(self) -> None:
+    def test_thgem_scan_x_is_voltage(self) -> None:
         with TemporaryDirectory() as td:
-            backend = SimulationInterface(seed=7)
-            backend.connect()
-            backend.set_ramp_rates(300.0, 300.0)
-            logger = DataLogger(Path(td))
             params = ScanParameters(
-                label="Drift", vthgem1_start_v=150, vthgem1_stop_v=250, vthgem1_step_v=50,
-                drift_field_kv_cm=0.4, induction_field_kv_cm=2.0, wait_seconds=0.0,
+                label="THGEM", scan_variable=ScanVariable.THGEM_VOLTAGE,
+                start=150, stop=250, step=50, drift_field_kv_cm=0.4, induction_field_kv_cm=2.0,
+                wait_seconds=0.0,
             )
-            csv_path = logger.open_run(params.label)
-            ScanController().run_scan(backend, params, logger, ScanCallbacks(), threading.Event())
-            logger.close()
-            series = series_from_csv(csv_path)
+            series = series_from_csv(_run_to_csv(td, params))
 
         self.assertEqual(series["x"], [150.0, 200.0, 250.0])
+        self.assertEqual(series["axis_title"], "THGEM1 voltage [V]")
         self.assertEqual(set(series["channels"]), set(CHANNEL_LABELS))
         self.assertEqual(len(series["channels"]["C"]), 3)
-        self.assertIn("Ed=0.4", series["label"])
+        self.assertIn("Ed=0.4", series["label"])  # held fields in the legend
         self.assertIn("Ei=2", series["label"])
+
+    def test_drift_scan_x_is_drift_field(self) -> None:
+        with TemporaryDirectory() as td:
+            params = ScanParameters(
+                label="Drift", scan_variable=ScanVariable.DRIFT_FIELD,
+                start=0.0, stop=1.0, step=0.5, v_thgem1_v=700.0, induction_field_kv_cm=1.0,
+                wait_seconds=0.0,
+            )
+            series = series_from_csv(_run_to_csv(td, params))
+
+        self.assertEqual(series["x"], [0.0, 0.5, 1.0])
+        self.assertEqual(series["axis_title"], "Drift field [kV/cm]")
+        self.assertIn("V=700", series["label"])  # held quantities, not the swept E_drift
+        self.assertIn("Ei=1", series["label"])
+
+    def test_legacy_csv_without_scan_variable_defaults_to_voltage(self) -> None:
+        with TemporaryDirectory() as td:
+            path = Path(td) / "legacy.csv"
+            path.write_text(
+                "mode,v_thgem1_v,e_drift_kv_cm,e_transfer_kv_cm,"
+                "c_imon_ua,t1_imon_ua,b1_imon_ua,t2_imon_ua\n"
+                "Old,150,0,1,0.10,0.20,0.30,0.40\n"
+                "Old,200,0,1,0.15,0.25,0.35,0.45\n",
+                encoding="utf-8",
+            )
+            series = series_from_csv(path)
+
+        self.assertEqual(series["x"], [150.0, 200.0])
+        self.assertEqual(series["axis_title"], "THGEM1 voltage [V]")
+        self.assertEqual(series["channels"]["C"], [0.10, 0.15])
 
 
 class PlotlyViewerLazyTests(unittest.TestCase):

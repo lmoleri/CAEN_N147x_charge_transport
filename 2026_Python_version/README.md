@@ -32,13 +32,22 @@ A single window with four tabs:
   toggle, and `All ON`, `All OFF`, plus `Refresh Setpoints` reseed the editable boxes from the
   hardware. A footer on this tab shows the latest manual action or failure. Manual control is
   disabled while a scan runs.
-- **Scan** — a single scan sweeps **V_THGEM1** (editable start/stop/step) while holding the
-  **drift** and **induction** fields constant; every parameter is user-set — V_THGEM1 range, drift
-  field + gap (C↔T1), induction field + gap (B1↔T2), and wait/point. The four named recipes
-  (Reference / Collection / Transfer field / Drift field) are **presets** that pre-fill those
-  fields. Start/Abort, with a run log; each run is written to a CSV under `measurements/`.
-- **Viewer** — a Plotly current-vs-V_THGEM1 viewer (in `μA`). **Load CSV…** plots a saved run; load
-  several to **overlay** them (auto-legended by their `Ed`/`Ei` settings), toggle channels
+- **Scan** — pick a **scan program**, which selects *which* quantity is swept; the other two are
+  held at editable values, and every point is turned into all four electrode voltages (C/T1/B1/T2)
+  so the relevant electrode actually moves:
+    - **THGEM voltage (gain)** — sweeps **V_THGEM1** (across T1→B1); holds the drift and induction
+      fields. Units: V.
+    - **Drift field scan** — sweeps **E_drift** (moves the cathode C relative to T1); holds V_THGEM1
+      and the induction field. Units: kV/cm.
+    - **Induction field scan** — sweeps **E_induction** / transfer field (moves T2 relative to B1);
+      holds V_THGEM1 and the drift field. Units: kV/cm.
+
+  The sweep start/stop/step relabels and switches units with the program, and the held box for the
+  swept quantity is greyed out. Gaps (drift C↔T1, induction B1↔T2), wait/point, and the UV-lamp flag
+  are editable. Start/Abort, with a run log; each run is written to a CSV under `measurements/`.
+- **Viewer** — a Plotly current viewer (in `μA`) whose **x-axis follows the swept variable** (THGEM
+  voltage, drift field, or induction field). **Load CSV…** plots a saved run; load several of the
+  *same* program to **overlay** them (auto-legended by their held quantities), toggle channels
   (C/T1/B1/T2), and **Clear**. Tick **Follow active scan** to track the running scan's CSV live.
   Plotting is decoupled from acquisition (the scan just writes CSV), mirroring
   [CAEN-Plotly-Viewer-From-Log](https://github.com/weizmann-atlas/CAEN-Plotly-Viewer-From-Log).

@@ -371,6 +371,7 @@ class UsbVcpSettings:
 class RunPointRecord:
     mode: str
     subscan_label: str
+    scan_variable: str  # which quantity was swept (ScanVariable value); x-axis hint for the Viewer
     uv_expected: bool
     point_index: int
     v_thgem1_v: float
@@ -404,6 +405,7 @@ class RunPointRecord:
         *,
         mode: str,
         subscan_label: str,
+        scan_variable: str = "thgem_voltage",
         uv_expected: bool,
         point_index: int,
         v_thgem1_v: float,
@@ -427,6 +429,7 @@ class RunPointRecord:
         return cls(
             mode=mode,
             subscan_label=subscan_label,
+            scan_variable=scan_variable,
             uv_expected=uv_expected,
             point_index=point_index,
             v_thgem1_v=v_thgem1_v,

@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 
 from caen_interface import CHANNEL_LABELS, SimulationInterface
 from data_logger import DataLogger
-from scan_controller import ScanCallbacks, ScanController, ScanParameters
+from scan_controller import ScanCallbacks, ScanController, ScanParameters, ScanVariable
 
 
 class ScanExecutionTests(unittest.TestCase):
@@ -40,27 +40,45 @@ class ScanExecutionTests(unittest.TestCase):
             row_count = sum(1 for _ in csv.DictReader(handle))
         return row_count, records
 
-    def test_single_curve_row_count_matches_scan_values(self) -> None:
-        params = ScanParameters(label="Custom", wait_seconds=0.0)  # 150→1500 step 25 = 55 pts
-        row_count, records = self._run(params)
+    def test_thgem_scan_row_count_matches_scan_values(self) -> None:
+        params = ScanParameters(label="THGEM", scan_variable=ScanVariable.THGEM_VOLTAGE, wait_seconds=0.0)
+        row_count, records = self._run(params)  # 150→1500 step 25 = 55 pts
         self.assertEqual(row_count, 55)
         self.assertEqual(len(records), 55)
-        self.assertTrue(all(record.subscan_label == "Custom" for record in records))
+        self.assertTrue(all(record.scan_variable == "thgem_voltage" for record in records))
+        self.assertTrue(all(record.subscan_label == "THGEM" for record in records))
 
     def test_custom_range_changes_point_count(self) -> None:
         params = ScanParameters(
-            label="Short", vthgem1_start_v=200, vthgem1_stop_v=300, vthgem1_step_v=50, wait_seconds=0.0
+            label="Short", scan_variable=ScanVariable.THGEM_VOLTAGE,
+            start=200, stop=300, step=50, wait_seconds=0.0,
         )
         row_count, records = self._run(params)
         self.assertEqual(row_count, 3)  # 200, 250, 300
         self.assertEqual(records[0].v_thgem1_v, 200.0)
         self.assertEqual(records[-1].v_thgem1_v, 300.0)
 
-    def test_records_carry_field_settings(self) -> None:
-        params = ScanParameters(label="Fields", drift_field_kv_cm=0.4, induction_field_kv_cm=2.0, wait_seconds=0.0)
+    def test_drift_scan_sweeps_field_and_holds_thgem_voltage(self) -> None:
+        params = ScanParameters(
+            label="Drift", scan_variable=ScanVariable.DRIFT_FIELD,
+            start=0.0, stop=1.0, step=0.5, v_thgem1_v=700.0, induction_field_kv_cm=1.0, wait_seconds=0.0,
+        )
+        row_count, records = self._run(params)
+        self.assertEqual(row_count, 3)  # 0.0, 0.5, 1.0
+        self.assertEqual([round(r.e_drift_kv_cm, 3) for r in records], [0.0, 0.5, 1.0])
+        self.assertTrue(all(r.v_thgem1_v == 700.0 for r in records))  # THGEM voltage held
+        self.assertTrue(all(r.e_transfer_kv_cm == 1.0 for r in records))  # induction held
+        self.assertTrue(all(r.scan_variable == "drift_field" for r in records))
+
+    def test_induction_scan_records_carry_swept_field(self) -> None:
+        params = ScanParameters(
+            label="Induction", scan_variable=ScanVariable.INDUCTION_FIELD,
+            start=0.0, stop=2.0, step=1.0, v_thgem1_v=700.0, drift_field_kv_cm=0.5, wait_seconds=0.0,
+        )
         _, records = self._run(params)
-        self.assertAlmostEqual(records[0].e_drift_kv_cm, 0.4)
-        self.assertAlmostEqual(records[0].e_transfer_kv_cm, 2.0)
+        self.assertEqual([round(r.e_transfer_kv_cm, 3) for r in records], [0.0, 1.0, 2.0])
+        self.assertTrue(all(r.e_drift_kv_cm == 0.5 for r in records))  # drift held
+        self.assertTrue(all(r.scan_variable == "induction_field" for r in records))
 
     def test_abort_stops_scan_and_powers_channels_off(self) -> None:
         backend = SimulationInterface(seed=11)
@@ -69,7 +87,7 @@ class ScanExecutionTests(unittest.TestCase):
 
         controller = ScanController()
         logger = DataLogger(self.output_dir)
-        params = ScanParameters(label="Collection", wait_seconds=0.2)
+        params = ScanParameters(label="THGEM", scan_variable=ScanVariable.THGEM_VOLTAGE, wait_seconds=0.2)
         csv_path = logger.open_run(params.label)
         abort_event = threading.Event()
         results: list = []

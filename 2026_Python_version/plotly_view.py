@@ -28,6 +28,7 @@ from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 
 from caen_interface import CHANNEL_LABELS
+from scan_controller import variable_spec_for
 
 CHANNEL_COLORS = {
     "C": "#d9534f",
@@ -60,6 +61,7 @@ function addFullSeries(name, color, xs, ys) {
       line: {color: color, width: 2}, marker: {color: color, size: 5}}]);
 }
 function setSubtitle(t) { document.getElementById('sub').textContent = t; }
+function setXAxisTitle(t) { Plotly.relayout('graph', {'xaxis.title': t}); }
 window.__plotReady = true;
 </script>
 </body></html>"""
@@ -145,39 +147,64 @@ def _safe_float(value) -> float | None:
         return None
 
 
-def _legend_for(path: Path, mode: str, e_drift, e_induction) -> str:
+def _legend_for(path: Path, scan_variable: str, mode: str, v_thgem1, e_drift, e_induction) -> str:
+    """Build a curve label from the *held* quantities (not the swept one), so an
+    overlay of same-program scans is distinguished by what was held constant."""
     parts: list[str] = []
     if mode:
         parts.append(str(mode))
-    if e_drift is not None and e_induction is not None:
-        parts.append(f"Ed={e_drift:g}, Ei={e_induction:g} kV/cm")
+    if scan_variable == "drift_field":
+        if v_thgem1 is not None and e_induction is not None:
+            parts.append(f"V={v_thgem1:g} V, Ei={e_induction:g} kV/cm")
+    elif scan_variable == "induction_field":
+        if v_thgem1 is not None and e_drift is not None:
+            parts.append(f"V={v_thgem1:g} V, Ed={e_drift:g} kV/cm")
+    else:  # thgem_voltage (and legacy CSVs without the column)
+        if e_drift is not None and e_induction is not None:
+            parts.append(f"Ed={e_drift:g}, Ei={e_induction:g} kV/cm")
     return " · ".join(parts) if parts else path.stem
 
 
 def series_from_csv(path) -> dict:
-    """Parse a scan CSV into per-channel current-vs-V_THGEM1 series + a legend
-    label. Pure (no Qt) so it is unit-testable headless.
+    """Parse a scan CSV into per-channel current series vs the swept variable.
 
-    Returns ``{"x": [...], "channels": {label: [...]}, "label": str, "path": str}``.
+    The x-axis follows the ``scan_variable`` column (THGEM voltage, drift field, or
+    induction field); CSVs written before that column existed default to V_THGEM1.
+    Pure (no Qt) so it is unit-testable headless.
+
+    Returns ``{"x", "channels", "label", "axis_title", "path"}``.
     """
     path = Path(path)
     xs: list[float] = []
     channels: dict[str, list[float | None]] = {label: [] for label in CHANNEL_LABELS}
-    e_drift = e_induction = None
+    scan_variable = "thgem_voltage"
+    spec = variable_spec_for(scan_variable)
     mode = ""
+    held_v = held_ed = held_ei = None
+    captured = False
     with path.open("r", newline="", encoding="utf-8") as handle:
         for row in _csv.DictReader(handle):
-            x = _safe_float(row.get("v_thgem1_v"))
+            if not captured:
+                scan_variable = row.get("scan_variable") or "thgem_voltage"
+                spec = variable_spec_for(scan_variable)
+                mode = row.get("mode") or row.get("subscan_label") or ""
+                held_v = _safe_float(row.get("v_thgem1_v"))
+                held_ed = _safe_float(row.get("e_drift_kv_cm"))
+                held_ei = _safe_float(row.get("e_transfer_kv_cm"))
+                captured = True
+            x = _safe_float(row.get(spec.record_column))
             if x is None:
                 continue
             xs.append(x)
             for label in CHANNEL_LABELS:
                 channels[label].append(_safe_float(row.get(f"{label.lower()}_imon_ua")))
-            if e_drift is None:
-                e_drift = _safe_float(row.get("e_drift_kv_cm"))
-                e_induction = _safe_float(row.get("e_transfer_kv_cm"))
-                mode = row.get("mode") or row.get("subscan_label") or ""
-    return {"x": xs, "channels": channels, "label": _legend_for(path, mode, e_drift, e_induction), "path": str(path)}
+    return {
+        "x": xs,
+        "channels": channels,
+        "label": _legend_for(path, scan_variable, mode, held_v, held_ed, held_ei),
+        "axis_title": spec.axis_title,
+        "path": str(path),
+    }
 
 
 class PlotlyViewer(QtWidgets.QWidget):
@@ -289,4 +316,6 @@ class PlotlyViewer(QtWidgets.QWidget):
                     f"addFullSeries({json.dumps(name)}, {json.dumps(color)}, "
                     f"{json.dumps(series['x'])}, {json.dumps(ys)});"
                 )
+        axis_title = series_list[-1].get("axis_title", "THGEM1 voltage [V]")
+        self._page.run_js(f"setXAxisTitle({json.dumps(axis_title)});")
         self._page.run_js(f"setSubtitle({json.dumps(' | '.join(s['label'] for s in series_list))});")

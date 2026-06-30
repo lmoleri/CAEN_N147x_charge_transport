@@ -5,7 +5,8 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable, Sequence
+from enum import Enum
+from typing import Callable
 
 from caen_interface import (
     CHANNEL_LABELS,
@@ -18,6 +19,7 @@ from caen_interface import (
 VTHGEM1_START_V = 150.0
 VTHGEM1_STOP_V = 1500.0
 VTHGEM1_STEP_V = 25.0
+VTHGEM1_HOLD_V = 700.0  # operating THGEM voltage held during a field scan
 
 DRIFT_GAP_CM = 0.5
 INDUCTION_GAP_CM = 0.1  # gap between THGEM1 bottom (B1) and the top electrode (T2)
@@ -26,69 +28,165 @@ T1_ANCHOR_V = 1.0
 DEFAULT_WAIT_SECONDS = 7.0
 
 
+class ScanVariable(Enum):
+    """The physical quantity a scan program sweeps."""
+
+    THGEM_VOLTAGE = "thgem_voltage"
+    DRIFT_FIELD = "drift_field"
+    INDUCTION_FIELD = "induction_field"
+
+
+@dataclass(frozen=True)
+class VariableSpec:
+    symbol: str         # e.g. "V_THGEM1"
+    unit: str           # "V" or "kV/cm"
+    record_column: str  # the RunPointRecord/CSV column that carries the swept value
+    axis_title: str     # Plotly x-axis title
+
+
+SCAN_VARIABLE_SPECS: dict[ScanVariable, VariableSpec] = {
+    ScanVariable.THGEM_VOLTAGE: VariableSpec("V_THGEM1", "V", "v_thgem1_v", "THGEM1 voltage [V]"),
+    ScanVariable.DRIFT_FIELD: VariableSpec("E_drift", "kV/cm", "e_drift_kv_cm", "Drift field [kV/cm]"),
+    ScanVariable.INDUCTION_FIELD: VariableSpec("E_induction", "kV/cm", "e_transfer_kv_cm", "Induction field [kV/cm]"),
+}
+
+
+def variable_spec_for(value: str | ScanVariable) -> VariableSpec:
+    """Resolve a spec from a ScanVariable or its stored string value.
+
+    Falls back to the THGEM-voltage spec for unknown/legacy values, so the Viewer
+    can still open CSVs written before the ``scan_variable`` column existed.
+    """
+    if isinstance(value, ScanVariable):
+        return SCAN_VARIABLE_SPECS[value]
+    try:
+        return SCAN_VARIABLE_SPECS[ScanVariable(value)]
+    except ValueError:
+        return SCAN_VARIABLE_SPECS[ScanVariable.THGEM_VOLTAGE]
+
+
 @dataclass(frozen=True)
 class ScanParameters:
-    """A single-curve scan: sweep V_THGEM1 while holding the drift and induction
-    fields (and their gaps) constant.
+    """A single-curve scan that sweeps one quantity while holding the other two.
 
     Geometry:  C ──drift gap── T1 ─[THGEM1]─ B1 ──induction gap── T2
-      V_THGEM1   = V_B1 − V_T1                (the swept multiplication voltage)
-      E_drift     = (V_C − V_T1) / drift_gap          (held constant)
-      E_induction = (V_T2 − V_B1) / induction_gap     (held constant)
+      V_THGEM1    = V_B1 − V_T1                        (THGEM multiplication voltage)
+      E_drift     = (V_C  − V_T1) / drift_gap          (cathode ↔ THGEM top)
+      E_induction = (V_T2 − V_B1) / induction_gap      (THGEM bottom ↔ top electrode)
+
+    ``scan_variable`` selects which of the three is swept over ``start → stop`` in
+    ``step`` increments; the other two are held at the values below. Every point is
+    turned into all four electrode voltages by :meth:`solve`, so e.g. a drift scan
+    moves only the cathode (C) while V_THGEM1 and the induction electrode hold.
     """
 
-    label: str = "Custom"
-    vthgem1_start_v: float = VTHGEM1_START_V
-    vthgem1_stop_v: float = VTHGEM1_STOP_V
-    vthgem1_step_v: float = VTHGEM1_STEP_V
+    label: str = "THGEM voltage"
+    scan_variable: ScanVariable = ScanVariable.THGEM_VOLTAGE
+    start: float = VTHGEM1_START_V
+    stop: float = VTHGEM1_STOP_V
+    step: float = VTHGEM1_STEP_V
+    v_thgem1_v: float = VTHGEM1_HOLD_V          # held when sweeping a field
+    drift_field_kv_cm: float = 0.0              # held when not the swept variable
+    induction_field_kv_cm: float = 1.0          # held when not the swept variable
     drift_gap_cm: float = DRIFT_GAP_CM
-    drift_field_kv_cm: float = 0.0
     induction_gap_cm: float = INDUCTION_GAP_CM
-    induction_field_kv_cm: float = 1.0
     wait_seconds: float = DEFAULT_WAIT_SECONDS
     uv_expected: bool = True
 
+    @property
+    def spec(self) -> VariableSpec:
+        return SCAN_VARIABLE_SPECS[self.scan_variable]
+
+    def unit(self) -> str:
+        return self.spec.unit
+
+    def axis_title(self) -> str:
+        return self.spec.axis_title
+
     def scan_values(self) -> tuple[float, ...]:
-        start, stop = float(self.vthgem1_start_v), float(self.vthgem1_stop_v)
-        step = abs(float(self.vthgem1_step_v))
+        start, stop = float(self.start), float(self.stop)
+        step = abs(float(self.step))
         if step <= 0:
             return (start,) if start == stop else (start, stop)
         direction = 1.0 if stop >= start else -1.0
         count = int(math.floor(abs(stop - start) / step + 1e-9)) + 1
         return tuple(round(start + direction * step * i, 6) for i in range(count))
 
-    def solve(self, v_thgem1_v: float) -> dict[str, float]:
+    def point_fields(self, swept_value: float) -> tuple[float, float, float]:
+        """Return (V_THGEM1, E_drift, E_induction) at a swept value: the held trio
+        with the swept variable overridden."""
+        v_thgem1 = self.v_thgem1_v
+        e_drift = self.drift_field_kv_cm
+        e_induction = self.induction_field_kv_cm
+        if self.scan_variable is ScanVariable.THGEM_VOLTAGE:
+            v_thgem1 = swept_value
+        elif self.scan_variable is ScanVariable.DRIFT_FIELD:
+            e_drift = swept_value
+        else:
+            e_induction = swept_value
+        return v_thgem1, e_drift, e_induction
+
+    def solve(self, swept_value: float) -> dict[str, float]:
+        v_thgem1, e_drift, e_induction = self.point_fields(swept_value)
         t1_v = T1_ANCHOR_V
-        b1_v = max(MIN_HV_V, v_thgem1_v - t1_v)
-        c_v = max(MIN_HV_V, t1_v + self.drift_field_kv_cm * 1000.0 * self.drift_gap_cm)
-        t2_v = max(MIN_HV_V, b1_v + self.induction_field_kv_cm * 1000.0 * self.induction_gap_cm)
+        b1_v = max(MIN_HV_V, v_thgem1 - t1_v)
+        c_v = max(MIN_HV_V, t1_v + e_drift * 1000.0 * self.drift_gap_cm)
+        t2_v = max(MIN_HV_V, b1_v + e_induction * 1000.0 * self.induction_gap_cm)
         return {"C": c_v, "T1": t1_v, "B1": b1_v, "T2": t2_v}
 
-    def field_config(self) -> FieldConfig:
+    def field_config_at(self, swept_value: float) -> FieldConfig:
         # The Simulation backend reads e_drift/e_transfer to model the current.
-        return FieldConfig(self.label, self.drift_field_kv_cm, self.induction_field_kv_cm, self.uv_expected)
+        _, e_drift, e_induction = self.point_fields(swept_value)
+        return FieldConfig(self.label, e_drift, e_induction, self.uv_expected)
 
     def legend_label(self) -> str:
-        return f"Ed={self.drift_field_kv_cm:g}, Ei={self.induction_field_kv_cm:g} kV/cm"
+        """Distinguish curves within a same-program overlay by the held quantities."""
+        if self.scan_variable is ScanVariable.THGEM_VOLTAGE:
+            return f"Ed={self.drift_field_kv_cm:g}, Ei={self.induction_field_kv_cm:g} kV/cm"
+        if self.scan_variable is ScanVariable.DRIFT_FIELD:
+            return f"V_THGEM1={self.v_thgem1_v:g} V, Ei={self.induction_field_kv_cm:g} kV/cm"
+        return f"V_THGEM1={self.v_thgem1_v:g} V, Ed={self.drift_field_kv_cm:g} kV/cm"
 
     def describe(self) -> str:
-        return (
-            f"V_THGEM1 {self.vthgem1_start_v:g} → {self.vthgem1_stop_v:g} V "
-            f"step {self.vthgem1_step_v:g} V ({len(self.scan_values())} pts) | "
-            f"E_drift {self.drift_field_kv_cm:g} kV/cm (gap {self.drift_gap_cm:g} cm) | "
-            f"E_induction {self.induction_field_kv_cm:g} kV/cm (gap {self.induction_gap_cm:g} cm) | "
-            f"wait {self.wait_seconds:g} s/pt | UV {'ON' if self.uv_expected else 'OFF'}"
-        )
+        spec = self.spec
+        parts = [
+            f"{spec.symbol} {self.start:g} → {self.stop:g} {spec.unit} "
+            f"step {self.step:g} {spec.unit} ({len(self.scan_values())} pts)"
+        ]
+        if self.scan_variable is not ScanVariable.THGEM_VOLTAGE:
+            parts.append(f"V_THGEM1 {self.v_thgem1_v:g} V (held)")
+        if self.scan_variable is not ScanVariable.DRIFT_FIELD:
+            parts.append(f"E_drift {self.drift_field_kv_cm:g} kV/cm (gap {self.drift_gap_cm:g} cm)")
+        if self.scan_variable is not ScanVariable.INDUCTION_FIELD:
+            parts.append(f"E_induction {self.induction_field_kv_cm:g} kV/cm (gap {self.induction_gap_cm:g} cm)")
+        parts.append(f"wait {self.wait_seconds:g} s/pt | UV {'ON' if self.uv_expected else 'OFF'}")
+        return " | ".join(parts)
 
 
-# Named presets pre-fill the editable Scan-tab fields. Each is a single curve;
-# overlay several with the plot's "persist" toggle to build a family.
+# Named programs pre-fill the editable Scan-tab fields. Each sweeps its own
+# quantity; overlay several with the plot's "persist" toggle to build a family.
 PRESETS: dict[str, ScanParameters] = {
-    "Reference": ScanParameters(label="Reference", drift_field_kv_cm=0.0, induction_field_kv_cm=0.0, uv_expected=False),
-    "Collection scan": ScanParameters(label="Collection", drift_field_kv_cm=0.0, induction_field_kv_cm=1.0),
-    "Transfer field scan": ScanParameters(label="Transfer", drift_field_kv_cm=0.0, induction_field_kv_cm=1.0),
-    "Drift field scan": ScanParameters(label="Drift", drift_field_kv_cm=0.0, induction_field_kv_cm=1.0),
+    "THGEM voltage (gain)": ScanParameters(
+        label="THGEM voltage",
+        scan_variable=ScanVariable.THGEM_VOLTAGE,
+        start=VTHGEM1_START_V, stop=VTHGEM1_STOP_V, step=VTHGEM1_STEP_V,
+        v_thgem1_v=VTHGEM1_HOLD_V, drift_field_kv_cm=0.0, induction_field_kv_cm=1.0,
+    ),
+    "Drift field scan": ScanParameters(
+        label="Drift field",
+        scan_variable=ScanVariable.DRIFT_FIELD,
+        start=0.0, stop=2.0, step=0.1,
+        v_thgem1_v=VTHGEM1_HOLD_V, drift_field_kv_cm=0.0, induction_field_kv_cm=1.0,
+    ),
+    "Induction field scan": ScanParameters(
+        label="Induction field",
+        scan_variable=ScanVariable.INDUCTION_FIELD,
+        start=0.0, stop=4.0, step=0.2,
+        v_thgem1_v=VTHGEM1_HOLD_V, drift_field_kv_cm=0.5, induction_field_kv_cm=0.0,
+    ),
 }
+
+DEFAULT_PRESET = "THGEM voltage (gain)"
 
 
 @dataclass(frozen=True)
@@ -121,18 +219,18 @@ class ScanController:
         callbacks: ScanCallbacks,
         abort_event: threading.Event,
     ) -> RunResult:
-        field_config = params.field_config()
         interface.power_on_channels(CHANNEL_LABELS)
         if callbacks.on_scan_started is not None:
             callbacks.on_scan_started(params)
 
-        for point_index, v_thgem1_v in enumerate(params.scan_values(), start=1):
+        for point_index, swept_value in enumerate(params.scan_values(), start=1):
             if abort_event.is_set():
                 self._handle_abort(interface, callbacks)
                 return RunResult(False, True, "Scan aborted safely.")
 
-            interface.set_measurement_context(field_config, float(v_thgem1_v))
-            interface.set_channel_voltages(params.solve(float(v_thgem1_v)))
+            v_thgem1_v, e_drift, e_induction = params.point_fields(float(swept_value))
+            interface.set_measurement_context(params.field_config_at(float(swept_value)), v_thgem1_v)
+            interface.set_channel_voltages(params.solve(float(swept_value)))
 
             if not self._wait_for_settle(params.wait_seconds, abort_event):
                 self._handle_abort(interface, callbacks)
@@ -146,11 +244,12 @@ class ScanController:
             record = RunPointRecord.from_snapshots(
                 mode=params.label,
                 subscan_label=params.label,
+                scan_variable=params.scan_variable.value,
                 uv_expected=params.uv_expected,
                 point_index=point_index,
-                v_thgem1_v=float(v_thgem1_v),
-                e_drift_kv_cm=params.drift_field_kv_cm,
-                e_transfer_kv_cm=params.induction_field_kv_cm,
+                v_thgem1_v=v_thgem1_v,
+                e_drift_kv_cm=e_drift,
+                e_transfer_kv_cm=e_induction,
                 timestamp_iso=timestamp_iso,
                 snapshots=snapshots,
             )
