@@ -44,9 +44,14 @@ class MainWindowTabbedShellTests(unittest.TestCase):
         self._serial_ports_patcher.stop()
         self._tmp.cleanup()
 
-    def test_three_tabs_in_order(self) -> None:
+    def test_tabs_in_order(self) -> None:
         titles = [self.window.tabs.tabText(i) for i in range(self.window.tabs.count())]
-        self.assertEqual(titles, ["Setup", "Channels", "Scan"])
+        self.assertEqual(titles, ["Setup", "Channels", "Scan", "Viewer"])
+
+    def test_viewer_has_no_webengine_until_used(self) -> None:
+        # The viewer's QWebEngineView is created lazily; constructing MainWindow
+        # must not instantiate it (it crashes on a headless CI runner).
+        self.assertIsNone(self.window.viewer._page)
 
     def test_channel_grid_lists_every_channel(self) -> None:
         self.assertEqual(set(self.window.channel_cells), set(CHANNEL_LABELS))

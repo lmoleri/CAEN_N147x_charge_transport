@@ -37,7 +37,7 @@ from caen_interface import (
     status_color_hex,
 )
 from data_logger import DataLogger
-from plotly_view import PlotlyScanView
+from plotly_view import PlotlyViewer
 from scan_controller import (
     DEFAULT_WAIT_SECONDS,
     DRIFT_GAP_CM,
@@ -311,6 +311,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self._build_setup_tab(), "Setup")
         self.tabs.addTab(self._build_channels_tab(), "Channels")
         self.tabs.addTab(self._build_scan_tab(), "Scan")
+        self.tabs.addTab(self._build_viewer_tab(), "Viewer")
         self.statusBar().showMessage("Ready.")
 
     def _build_setup_tab(self) -> QtWidgets.QWidget:
@@ -462,8 +463,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uv_check.setChecked(True)
         self.start_button = QtWidgets.QPushButton("Start Scan")
         self.abort_button = QtWidgets.QPushButton("Abort")
-        self.persist_check = QtWidgets.QCheckBox("Persist (overlay runs)")
-        self.clear_plot_button = QtWidgets.QPushButton("Clear plot")
 
         self.scan_summary_label = QtWidgets.QLabel()
         self.scan_summary_label.setWordWrap(True)
@@ -478,8 +477,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uv_check.toggled.connect(self._on_scan_param_changed)
         self.start_button.clicked.connect(self._queue_start_scan)
         self.abort_button.clicked.connect(self._request_abort)
-        self.persist_check.toggled.connect(lambda on: self.plot_tabs.set_persist(on))
-        self.clear_plot_button.clicked.connect(lambda: self.plot_tabs.clear())
 
         r = 0
         layout.addWidget(QtWidgets.QLabel("Preset"), r, 0)
@@ -507,9 +504,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(QtWidgets.QLabel("Induction gap (B1↔T2)"), r, 2)
         layout.addWidget(self.induction_gap_spin, r, 3)
         r += 1
-        layout.addWidget(self.uv_check, r, 0, 1, 2)
-        layout.addWidget(self.persist_check, r, 2)
-        layout.addWidget(self.clear_plot_button, r, 3)
+        layout.addWidget(self.uv_check, r, 0, 1, 4)
         r += 1
         layout.addWidget(self.scan_summary_label, r, 0, 1, 4)
         r += 1
@@ -621,22 +616,48 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(tab)
         layout.setSpacing(8)
         layout.addWidget(self._build_scan_group())
-
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        splitter.addWidget(self._build_plot_group())
-        splitter.addWidget(self._build_log_group())
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 0)
-        splitter.setSizes([600, 160])
-        layout.addWidget(splitter, stretch=1)
+        layout.addWidget(self._build_log_group(), stretch=1)
         return tab
 
-    def _build_plot_group(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("Current vs THGEM1 Voltage")
-        layout = QtWidgets.QVBoxLayout(group)
-        self.plot_tabs = PlotlyScanView()
-        layout.addWidget(self.plot_tabs)
-        return group
+    def _build_viewer_tab(self) -> QtWidgets.QWidget:
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+
+        self.viewer = PlotlyViewer()
+
+        toolbar = QtWidgets.QHBoxLayout()
+        load_button = QtWidgets.QPushButton("Load CSV…")
+        load_button.clicked.connect(self._load_viewer_csv)
+        clear_button = QtWidgets.QPushButton("Clear")
+        clear_button.clicked.connect(self.viewer.clear)
+        toolbar.addWidget(load_button)
+        toolbar.addWidget(clear_button)
+        toolbar.addSpacing(16)
+        toolbar.addWidget(QtWidgets.QLabel("Channels:"))
+        self.viewer_channel_checks: dict[str, QtWidgets.QCheckBox] = {}
+        for label in CHANNEL_LABELS:
+            check = QtWidgets.QCheckBox(label)
+            check.setChecked(True)
+            check.toggled.connect(lambda on, lbl=label: self.viewer.set_channel_visible(lbl, on))
+            self.viewer_channel_checks[label] = check
+            toolbar.addWidget(check)
+        toolbar.addSpacing(16)
+        self.follow_check = QtWidgets.QCheckBox("Follow active scan")
+        self.follow_check.toggled.connect(self.viewer.set_follow)
+        toolbar.addWidget(self.follow_check)
+        toolbar.addStretch(1)
+
+        layout.addLayout(toolbar)
+        layout.addWidget(self.viewer, stretch=1)
+        return tab
+
+    def _load_viewer_csv(self) -> None:
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self, "Load scan CSV", str(self.base_dir / "measurements"),
+            "CSV files (*.csv);;All files (*)",
+        )
+        if paths:
+            self.viewer.load_files(paths)
 
     def _build_log_group(self) -> QtWidgets.QGroupBox:
         group = QtWidgets.QGroupBox("Run Log")
@@ -740,7 +761,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_scan_inputs_enabled(self, enabled: bool) -> None:
         self.preset_combo.setEnabled(enabled)
         self.uv_check.setEnabled(enabled)
-        self.clear_plot_button.setEnabled(enabled)
         for box in self._scan_spins:
             box.setEnabled(enabled)
 
@@ -873,7 +893,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.channels_status_label.setText(message)
 
     def _on_scan_prepared(self, params: object, csv_path: str) -> None:
-        self.plot_tabs.begin_run(params)
+        self.viewer.set_active_csv(csv_path)
         self.output_path_label.setText(f"CSV output: {csv_path}")
         self.scan_running = True
         self.poll_timer.stop()
@@ -882,7 +902,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Scan running...")
 
     def _on_point_recorded(self, record: object) -> None:
-        self.plot_tabs.append_record(record)
         self._on_channel_refresh(list(record.channel_snapshots().values()))
 
     def _on_scan_finished(
@@ -894,6 +913,7 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> None:
         self.scan_running = False
         self._set_scan_state(False)
+        self.viewer.notify_scan_finished()
         if self.connected_backend:
             self.poll_timer.start()
         self._on_channel_refresh(final_snapshots)

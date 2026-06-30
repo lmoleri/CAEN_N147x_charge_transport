@@ -1,21 +1,28 @@
-"""Live scan plot rendered with Plotly inside a Qt WebEngine view.
+"""File-based current-vs-THGEM1-voltage viewer rendered with Plotly in a Qt
+WebEngine view.
 
-A single accumulating plot of current vs THGEM1 voltage. Each scan run adds the
-four channel traces (C/T1/B1/T2). With *persist* enabled, successive runs are
-overlaid and auto-legended (by their drift/induction field settings) so families
-of curves can be built up one run at a time; otherwise each run clears the plot.
+The viewer loads scan **CSV files** and plots them (overlaying several, with
+per-channel toggles), and can *follow* an active scan's CSV for a near-live view.
+Plotting is decoupled from the scan: the Scan tab just writes CSV.
+
+The ``QWebEngineView`` is created **lazily** on first render — constructing the
+widget (e.g. in tests, or on a headless CI runner) never instantiates QtWebEngine,
+which crashes on a display-less / GPU-less machine.
 
 The Plotly page (and the bundled plotly.js) is served over a 127.0.0.1 loopback
-HTTP server rather than via ``file://`` / ``setHtml``: QtWebEngine cannot load
-local content reliably once the app is frozen by PyInstaller.
+HTTP server rather than ``file://`` / ``setHtml``: QtWebEngine cannot load local
+content reliably once the app is frozen by PyInstaller. This mirrors
+weizmann-atlas/CAEN-Plotly-Viewer-From-Log.
 """
 
 from __future__ import annotations
 
+import csv as _csv
 import json
 import math
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtWebEngineWidgets import QWebEngineView
@@ -48,12 +55,9 @@ const LAYOUT = {
 };
 Plotly.newPlot('graph', [], LAYOUT, {responsive: true, displaylogo: false});
 function clearAll() { Plotly.react('graph', [], LAYOUT); }
-function addSeries(name, color) {
-   Plotly.addTraces('graph', [{x: [], y: [], mode: 'lines+markers', name: name,
-      line: {color: color, width: 2}, marker: {color: color, size: 6}}]);
-}
-function addRowAt(indices, x, ys) {
-   Plotly.extendTraces('graph', {x: ys.map(() => [x]), y: ys.map(v => [v])}, indices);
+function addFullSeries(name, color, xs, ys) {
+   Plotly.addTraces('graph', [{x: xs, y: ys, mode: 'lines+markers', name: name,
+      line: {color: color, width: 2}, marker: {color: color, size: 5}}]);
 }
 function setSubtitle(t) { document.getElementById('sub').textContent = t; }
 window.__plotReady = true;
@@ -130,53 +134,159 @@ class _PlotPage(QWebEngineView):
             self._pending.append(js)
 
 
-def _finite_or_none(value: float) -> float | None:
+def _finite_or_none(value) -> float | None:
     return value if isinstance(value, (int, float)) and math.isfinite(value) else None
 
 
-class PlotlyScanView(QtWidgets.QWidget):
-    """Single accumulating current-vs-THGEM1-voltage plot with a persist/overlay mode."""
+def _safe_float(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _legend_for(path: Path, mode: str, e_drift, e_induction) -> str:
+    parts: list[str] = []
+    if mode:
+        parts.append(str(mode))
+    if e_drift is not None and e_induction is not None:
+        parts.append(f"Ed={e_drift:g}, Ei={e_induction:g} kV/cm")
+    return " · ".join(parts) if parts else path.stem
+
+
+def series_from_csv(path) -> dict:
+    """Parse a scan CSV into per-channel current-vs-V_THGEM1 series + a legend
+    label. Pure (no Qt) so it is unit-testable headless.
+
+    Returns ``{"x": [...], "channels": {label: [...]}, "label": str, "path": str}``.
+    """
+    path = Path(path)
+    xs: list[float] = []
+    channels: dict[str, list[float | None]] = {label: [] for label in CHANNEL_LABELS}
+    e_drift = e_induction = None
+    mode = ""
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        for row in _csv.DictReader(handle):
+            x = _safe_float(row.get("v_thgem1_v"))
+            if x is None:
+                continue
+            xs.append(x)
+            for label in CHANNEL_LABELS:
+                channels[label].append(_safe_float(row.get(f"{label.lower()}_imon_ua")))
+            if e_drift is None:
+                e_drift = _safe_float(row.get("e_drift_kv_cm"))
+                e_induction = _safe_float(row.get("e_transfer_kv_cm"))
+                mode = row.get("mode") or row.get("subscan_label") or ""
+    return {"x": xs, "channels": channels, "label": _legend_for(path, mode, e_drift, e_induction), "path": str(path)}
+
+
+class PlotlyViewer(QtWidgets.QWidget):
+    """Plots one or more scan CSVs (current vs V_THGEM1). The QtWebEngine view is
+    created lazily on the first render."""
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        self._page = _PlotPage()
-        layout.addWidget(self._page)
-        self._persist = False
-        self._trace_count = 0
-        self._run_indices: dict[str, int] = {}
+        self._layout = QtWidgets.QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._placeholder = QtWidgets.QLabel(
+            'Load a scan CSV (or tick "Follow active scan") to plot current vs V_THGEM1.'
+        )
+        self._placeholder.setAlignment(QtCore.Qt.AlignCenter)
+        self._placeholder.setStyleSheet("color: grey; font-style: italic;")
+        self._layout.addWidget(self._placeholder)
+        self._page: _PlotPage | None = None
 
-    def set_persist(self, on: bool) -> None:
-        self._persist = bool(on)
+        self._files: list[dict] = []
+        self._live: dict | None = None
+        self._visible: set[str] = set(CHANNEL_LABELS)
+
+        self._follow = False
+        self._active_path = None
+        self._follow_timer = QtCore.QTimer(self)
+        self._follow_timer.setInterval(1000)
+        self._follow_timer.timeout.connect(self._poll_active)
+
+    def _ensure_page(self) -> None:
+        if self._page is None:
+            self._placeholder.hide()
+            self._page = _PlotPage()
+            self._layout.addWidget(self._page)
+
+    def load_files(self, paths) -> None:
+        for path in paths:
+            try:
+                self._files.append(series_from_csv(path))
+            except Exception:  # pragma: no cover - bad/locked file
+                continue
+        self._render()
 
     def clear(self) -> None:
-        self._trace_count = 0
-        self._run_indices = {}
-        self._page.run_js("clearAll();")
+        self._files = []
+        self._live = None
+        if self._page is not None:
+            self._page.run_js("clearAll();")
+            self._page.run_js('setSubtitle("");')
 
-    def begin_run(self, params) -> None:
-        """Start a new scan run. Clears first unless persist is on."""
-        if not self._persist:
-            self.clear()
-        self._run_indices = {}
-        suffix = f" · {params.legend_label()}" if self._persist else ""
-        for label in CHANNEL_LABELS:
-            name = f"{label}{suffix}"
-            color = CHANNEL_COLORS.get(label, "#888888")
-            self._page.run_js(f"addSeries({json.dumps(name)}, {json.dumps(color)});")
-            self._run_indices[label] = self._trace_count
-            self._trace_count += 1
-        self._page.run_js(f"setSubtitle({json.dumps(params.describe())});")
+    def set_channel_visible(self, label: str, visible: bool) -> None:
+        if visible:
+            self._visible.add(label)
+        else:
+            self._visible.discard(label)
+        self._render()
 
-    def append_record(self, record) -> None:
-        if not self._run_indices:
+    def set_follow(self, on: bool) -> None:
+        self._follow = bool(on)
+        if self._follow and self._active_path:
+            self._poll_active()
+            self._follow_timer.start()
+        else:
+            self._follow_timer.stop()
+            if not self._follow:
+                self._live = None
+                self._render()
+
+    def set_active_csv(self, path) -> None:
+        """A scan started; track this CSV if 'Follow active scan' is on."""
+        self._active_path = path
+        self._live = None
+        if self._follow:
+            self._poll_active()
+            self._follow_timer.start()
+
+    def notify_scan_finished(self) -> None:
+        self._follow_timer.stop()
+        if self._follow and self._active_path:
+            self._poll_active()  # one last refresh of the completed curve
+
+    def _poll_active(self) -> None:
+        if not self._active_path or not Path(self._active_path).exists():
             return
-        snapshots = record.channel_snapshots()
-        x = _finite_or_none(record.v_thgem1_v)
-        ys = [
-            _finite_or_none(snapshots[label].imon_ua) if label in snapshots else None
-            for label in CHANNEL_LABELS
-        ]
-        indices = [self._run_indices[label] for label in CHANNEL_LABELS]
-        self._page.run_js(f"addRowAt({json.dumps(indices)}, {json.dumps(x)}, {json.dumps(ys)});")
+        try:
+            self._live = series_from_csv(self._active_path)
+        except Exception:  # pragma: no cover - mid-write read
+            return
+        self._render()
+
+    def _render(self) -> None:
+        series_list = list(self._files)
+        if self._live is not None:
+            series_list.append(self._live)
+        if not series_list:
+            if self._page is not None:
+                self._page.run_js("clearAll();")
+            return
+        self._ensure_page()
+        self._page.run_js("clearAll();")
+        multi = len(series_list) > 1
+        for series in series_list:
+            for label in CHANNEL_LABELS:
+                if label not in self._visible:
+                    continue
+                ys = [_finite_or_none(v) for v in series["channels"].get(label, [])]
+                name = f"{label} · {series['label']}" if multi else label
+                color = CHANNEL_COLORS.get(label, "#888888")
+                self._page.run_js(
+                    f"addFullSeries({json.dumps(name)}, {json.dumps(color)}, "
+                    f"{json.dumps(series['x'])}, {json.dumps(ys)});"
+                )
+        self._page.run_js(f"setSubtitle({json.dumps(' | '.join(s['label'] for s in series_list))});")
