@@ -24,6 +24,7 @@ class ScanExecutionTests(unittest.TestCase):
         backend = SimulationInterface(seed=7)
         backend.connect()
         backend.set_ramp_rates(300.0, 300.0)
+        backend.power_on_channels(CHANNEL_LABELS)  # the scan drives only ON channels
 
         controller = ScanController()
         logger = DataLogger(self.output_dir)
@@ -85,6 +86,7 @@ class ScanExecutionTests(unittest.TestCase):
         backend = SimulationInterface(seed=11)
         backend.connect()
         backend.set_ramp_rates(300.0, 300.0)
+        backend.power_on_channels(CHANNEL_LABELS)
 
         controller = ScanController()
         logger = DataLogger(self.output_dir)
@@ -113,6 +115,50 @@ class ScanExecutionTests(unittest.TestCase):
         with csv_path.open("r", newline="", encoding="utf-8") as handle:
             row_count = sum(1 for _ in csv.DictReader(handle))
         self.assertLess(row_count, 55)
+
+    def test_scan_blocked_when_no_channels_are_on(self) -> None:
+        backend = SimulationInterface(seed=7)
+        backend.connect()
+        backend.power_off_channels(CHANNEL_LABELS)  # nothing energized
+
+        controller = ScanController()
+        logger = DataLogger(self.output_dir)
+        params = ScanParameters(label="THGEM", scan_variable=ScanVariable.THGEM_VOLTAGE, wait_seconds=0.0)
+        csv_path = logger.open_run(params.label)
+        result = controller.run_scan(backend, params, logger, ScanCallbacks(), threading.Event())
+        logger.close()
+
+        self.assertFalse(result.success)
+        self.assertFalse(result.aborted)
+        self.assertIn("nothing to scan", result.message)
+        with csv_path.open("r", newline="", encoding="utf-8") as handle:
+            self.assertEqual(sum(1 for _ in csv.DictReader(handle)), 0)  # no rows written
+
+    def test_scan_drives_only_the_powered_channels(self) -> None:
+        backend = SimulationInterface(seed=7)
+        backend.connect()
+        backend.set_ramp_rates(300.0, 300.0)
+        backend.power_on_channels(["B1", "T2"])  # leave C and T1 OFF
+
+        controller = ScanController()
+        logger = DataLogger(self.output_dir)
+        params = ScanParameters(
+            label="THGEM", scan_variable=ScanVariable.THGEM_VOLTAGE,
+            start=200, stop=300, step=50, t1_v=300.0, b1_v=400.0, wait_seconds=0.0,
+        )
+        csv_path = logger.open_run(params.label)
+        result = controller.run_scan(backend, params, logger, ScanCallbacks(), threading.Event())
+        logger.close()
+
+        self.assertTrue(result.success)
+        # OFF channels were never driven → still at the connect() default (1.0 V).
+        self.assertEqual(backend._channel_state["C"]["voltage_v"], 1.0)
+        self.assertEqual(backend._channel_state["T1"]["voltage_v"], 1.0)
+        # ON channels were driven to the last point's setpoints (B1 swept to 300).
+        self.assertEqual(backend._channel_state["B1"]["voltage_v"], 300.0)
+        self.assertGreater(backend._channel_state["T2"]["voltage_v"], 1.0)
+        with csv_path.open("r", newline="", encoding="utf-8") as handle:
+            self.assertEqual(sum(1 for _ in csv.DictReader(handle)), 3)
 
 
 if __name__ == "__main__":

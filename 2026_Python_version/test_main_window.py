@@ -202,6 +202,50 @@ class MainWindowTabbedShellTests(unittest.TestCase):
         self.assertEqual(self.window.bias_table.rowCount(), len(params.scan_values()))
         self.assertIsNotNone(self.window.bias_table.item(0, 1))  # C column populated
 
+    def _seed_power(self, on_labels) -> None:
+        snapshots = [
+            ChannelSnapshot(
+                label, index, "-" if label in ("C", "T1") else "+",
+                10.0, 0.1, label in on_labels, 1, "ON" if label in on_labels else "OFF",
+            )
+            for index, label in enumerate(CHANNEL_LABELS)
+        ]
+        self.window._on_channel_refresh(snapshots)
+
+    def test_start_blocked_when_all_channels_off(self) -> None:
+        self._seed_power(on_labels=[])
+        emitted: list = []
+        self.window.start_scan_requested.connect(lambda *_a: emitted.append(1))
+        with mock.patch.object(QtWidgets.QMessageBox, "warning") as warn, \
+                mock.patch.object(QtWidgets.QMessageBox, "question") as question:
+            self.window._queue_start_scan()
+        warn.assert_called_once()       # told to power channels on first
+        question.assert_not_called()
+        self.assertEqual(emitted, [])   # no scan launched
+
+    def test_start_emits_directly_when_all_channels_on(self) -> None:
+        self._seed_power(on_labels=list(CHANNEL_LABELS))
+        emitted: list = []
+        self.window.start_scan_requested.connect(lambda *_a: emitted.append(1))
+        with mock.patch.object(QtWidgets.QMessageBox, "warning") as warn, \
+                mock.patch.object(QtWidgets.QMessageBox, "question") as question:
+            self.window._queue_start_scan()
+        warn.assert_not_called()
+        question.assert_not_called()    # no dialog when all on
+        self.assertEqual(emitted, [1])
+
+    def test_start_confirms_when_some_channels_off(self) -> None:
+        self._seed_power(on_labels=["B1", "T2"])  # C, T1 off
+        emitted: list = []
+        self.window.start_scan_requested.connect(lambda *_a: emitted.append(1))
+        with mock.patch.object(QtWidgets.QMessageBox, "question", return_value=QtWidgets.QMessageBox.No) as q:
+            self.window._queue_start_scan()
+        q.assert_called_once()
+        self.assertEqual(emitted, [])  # declined → no scan
+        with mock.patch.object(QtWidgets.QMessageBox, "question", return_value=QtWidgets.QMessageBox.Yes):
+            self.window._queue_start_scan()
+        self.assertEqual(emitted, [1])  # confirmed → scan launched
+
     def test_hardware_settings_defaults_match_usb_vcp_defaults(self) -> None:
         self.window.backend_combo.setCurrentText("CAEN USB-VCP")
 

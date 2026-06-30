@@ -17,6 +17,7 @@ def _run_to_csv(td: str, params: ScanParameters) -> Path:
     backend = SimulationInterface(seed=7)
     backend.connect()
     backend.set_ramp_rates(300.0, 300.0)
+    backend.power_on_channels(CHANNEL_LABELS)  # the scan drives only ON channels
     logger = DataLogger(Path(td))
     csv_path = logger.open_run(params.label)
     ScanController().run_scan(backend, params, logger, ScanCallbacks(), threading.Event())

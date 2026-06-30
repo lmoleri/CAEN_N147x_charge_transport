@@ -940,7 +940,36 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.connected_backend and not self.scan_running:
             self.refresh_controls_requested.emit()
 
+    def _channel_is_on(self, label: str) -> bool:
+        # The power button is kept in sync with hardware by _sync_power_button /
+        # _on_channel_refresh, so its checked state is the latest known on/off.
+        return bool(self.channel_cells[label]["power"].isChecked())
+
     def _queue_start_scan(self) -> None:
+        # The scan never powers HV on; require at least one channel ON and confirm
+        # if any are OFF (those are left untouched, scanned only the ON ones).
+        off = [label for label in CHANNEL_LABELS if not self._channel_is_on(label)]
+        if len(off) == len(CHANNEL_LABELS):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "No HV channels on",
+                "All HV channels are OFF. Power on the channels you want to scan first — "
+                "the scan never switches HV on itself.",
+            )
+            return
+        if off:
+            on = [label for label in CHANNEL_LABELS if label not in off]
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                "Some HV channels off",
+                f"Channels {', '.join(off)} are OFF and will NOT be energized.\n"
+                f"The scan will run using only the channels that are ON ({', '.join(on)}).\n\n"
+                "Proceed?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No,
+            )
+            if reply != QtWidgets.QMessageBox.Yes:
+                return
         self.start_scan_requested.emit(self._current_scan_parameters())
 
     def _request_abort(self) -> None:

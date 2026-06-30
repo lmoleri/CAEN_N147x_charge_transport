@@ -10,7 +10,6 @@ from typing import Callable
 
 from caen_interface import (
     CHANNEL_BY_LABEL,
-    CHANNEL_LABELS,
     BaseCaenInterface,
     FieldConfig,
     RunPointRecord,
@@ -244,22 +243,29 @@ class ScanController:
         callbacks: ScanCallbacks,
         abort_event: threading.Event,
     ) -> RunResult:
-        interface.power_on_channels(CHANNEL_LABELS)
+        # The scan never powers HV on: it drives only the channels already ON and
+        # leaves the rest untouched (the GUI confirms/blocks before we get here).
+        active = [snapshot.label for snapshot in interface.read_all_channels() if snapshot.is_on]
+        if not active:
+            return RunResult(False, False, "No HV channels are ON; nothing to scan.")
+        if callbacks.on_status_message is not None:
+            callbacks.on_status_message(f"Scanning channels that are ON: {', '.join(active)}.")
         if callbacks.on_scan_started is not None:
             callbacks.on_scan_started(params)
 
         for point_index, swept_value in enumerate(params.scan_values(), start=1):
             if abort_event.is_set():
-                self._handle_abort(interface, callbacks)
+                self._handle_abort(interface, callbacks, active)
                 return RunResult(False, True, "Scan aborted safely.")
 
             _, _, e_drift, e_induction = params.point_state(float(swept_value))
             v_thgem1_v = params.thgem_voltage_at(float(swept_value))
             interface.set_measurement_context(params.field_config_at(float(swept_value)), v_thgem1_v)
-            interface.set_channel_voltages(params.solve(float(swept_value)))
+            solved = params.solve(float(swept_value))
+            interface.set_channel_voltages({label: solved[label] for label in active})
 
             if not self._wait_for_settle(params.wait_seconds, abort_event):
-                self._handle_abort(interface, callbacks)
+                self._handle_abort(interface, callbacks, active)
                 return RunResult(False, True, "Scan aborted safely.")
 
             snapshots = interface.read_all_channels()
@@ -296,10 +302,10 @@ class ScanController:
             time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
         return not abort_event.is_set()
 
-    def _handle_abort(self, interface: BaseCaenInterface, callbacks: ScanCallbacks) -> None:
+    def _handle_abort(self, interface: BaseCaenInterface, callbacks: ScanCallbacks, active: list[str]) -> None:
         if callbacks.on_status_message is not None:
-            callbacks.on_status_message("Abort requested. Returning all channels to 1 V.")
-        interface.safe_shutdown(CHANNEL_LABELS)
+            callbacks.on_status_message("Abort requested. Returning scanned channels to 1 V.")
+        interface.safe_shutdown(active)
 
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
@@ -310,7 +316,7 @@ class ScanController:
                 break
             time.sleep(0.25)
 
-        interface.power_off_channels(CHANNEL_LABELS)
+        interface.power_off_channels(active)
         snapshots = interface.read_all_channels()
         if callbacks.on_channel_refresh is not None:
             callbacks.on_channel_refresh(snapshots)
