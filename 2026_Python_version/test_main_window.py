@@ -125,6 +125,23 @@ class MainWindowTabbedShellTests(unittest.TestCase):
         self.window._set_channels_status("Setpoints refreshed.")
         self.assertEqual(self.window.channels_status_label.text(), "Setpoints refreshed.")
 
+    def test_power_toggle_optimistic_until_confirmed(self) -> None:
+        cells = self.window.channel_cells["C"]
+        # Optimistic ON (as _on_power_clicked does), without emitting to the worker.
+        self.window._pending_power["C"] = True
+        self.window._sync_power_button(cells["power"], True)
+        self.assertEqual(cells["power"].text(), "ON")
+
+        # A stale read-back (command not applied yet) must NOT revert the optimistic ON.
+        self.window._on_channel_refresh([ChannelSnapshot("C", 0, "-", 0.0, 0.0, False, 0, "OFF")])
+        self.assertEqual(cells["power"].text(), "ON")
+        self.assertIn("C", self.window._pending_power)
+
+        # The confirming read-back clears the pending state and syncs.
+        self.window._on_channel_refresh([ChannelSnapshot("C", 0, "-", 10.0, 0.1, True, 1, "ON")])
+        self.assertEqual(cells["power"].text(), "ON")
+        self.assertNotIn("C", self.window._pending_power)
+
     def test_hardware_settings_defaults_match_usb_vcp_defaults(self) -> None:
         self.window.backend_combo.setCurrentText("CAEN USB-VCP")
 

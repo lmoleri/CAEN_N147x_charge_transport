@@ -535,6 +535,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_vset: dict[str, float] = {}
         self._last_ramp_up: dict[str, float] = {}
         self._last_ramp_down: dict[str, float] = {}
+        self._pending_power: dict[str, bool] = {}  # label -> intended power, until a read-back confirms
         for row, channel in enumerate(CHANNEL_DEFINITIONS):
             label = channel.label
             polarity = "negative" if channel.polarity == "-" else "positive"
@@ -599,8 +600,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.all_on_button = QtWidgets.QPushButton("All ON")
         self.all_off_button = QtWidgets.QPushButton("All OFF")
         self.refresh_setpoints_button = QtWidgets.QPushButton("Refresh Setpoints")
-        self.all_on_button.clicked.connect(lambda: self.set_all_power_requested.emit(True))
-        self.all_off_button.clicked.connect(lambda: self.set_all_power_requested.emit(False))
+        self.all_on_button.clicked.connect(lambda: self._on_all_power_clicked(True))
+        self.all_off_button.clicked.connect(lambda: self._on_all_power_clicked(False))
         self.refresh_setpoints_button.clicked.connect(self._queue_refresh_controls)
         button_row.addWidget(self.all_on_button)
         button_row.addWidget(self.all_off_button)
@@ -814,7 +815,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.set_ramp_down_requested.emit(label, value)
 
     def _on_power_clicked(self, label: str, checked: bool) -> None:
+        # Optimistic feedback: reflect the intent in the button immediately; the
+        # read-back confirms it (reconciled in _on_channel_refresh) so the toggle
+        # feels instant even when the hardware round-trip is slow.
+        self._pending_power[label] = checked
+        self._sync_power_button(self.channel_cells[label]["power"], checked)
         self.set_power_requested.emit(label, checked)
+
+    def _on_all_power_clicked(self, on: bool) -> None:
+        for label, cells in self.channel_cells.items():
+            self._pending_power[label] = on
+            self._sync_power_button(cells["power"], on)
+        self.set_all_power_requested.emit(on)
 
     def _on_connected(self, success: bool, message: str, snapshots: object, controls: object) -> None:
         if not success:
@@ -857,7 +869,14 @@ class MainWindow(QtWidgets.QMainWindow):
             cells["current"].setText(f"{snapshot.imon_ua:+.4f}")
             cells["status"].setText(snapshot.status_text)
             self._apply_status_color(cells["status"], snapshot)
-            self._sync_power_button(cells["power"], snapshot.is_on)
+            intended = self._pending_power.get(snapshot.label)
+            if intended is None:
+                self._sync_power_button(cells["power"], snapshot.is_on)
+            elif snapshot.is_on == intended:
+                # hardware confirmed the optimistic state — stop overriding it
+                del self._pending_power[snapshot.label]
+                self._sync_power_button(cells["power"], snapshot.is_on)
+            # else: command not applied yet — keep the optimistic button state
 
     def _on_control_refresh(self, controls: object) -> None:
         if not isinstance(controls, (list, tuple)):
@@ -923,6 +942,9 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Scan failed", message)
 
     def _on_error(self, message: str) -> None:
+        # A manual command may have failed; drop optimistic power states so the
+        # next read-back shows the true hardware state.
+        self._pending_power.clear()
         self._append_log(message)
         self.statusBar().showMessage(message, 6000)
         QtWidgets.QMessageBox.warning(self, "Error", message)
