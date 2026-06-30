@@ -18,7 +18,7 @@ Two backends:
 
 ## Interface
 
-A single window with three tabs:
+A single window with four tabs:
 
 - **Setup** — choose the backend (Simulation / CAEN USB-VCP) and COM port, then Connect/Disconnect.
   For hardware, an advanced section exposes the transport mode (`direct serial`, `wrapper auto`,
@@ -36,10 +36,12 @@ A single window with three tabs:
   **drift** and **induction** fields constant; every parameter is user-set — V_THGEM1 range, drift
   field + gap (C↔T1), induction field + gap (B1↔T2), and wait/point. The four named recipes
   (Reference / Collection / Transfer field / Drift field) are **presets** that pre-fill those
-  fields. Start/Abort, with the live **current vs THGEM1 voltage** plot (Plotly in a Qt WebEngine
-  view, in `μA`) and a run log. Tick **Persist** to overlay successive runs on the same plot —
-  each curve is auto-legended by its `Ed`/`Ei` settings, so families of curves are built one run at
-  a time; **Clear plot** resets it.
+  fields. Start/Abort, with a run log; each run is written to a CSV under `measurements/`.
+- **Viewer** — a Plotly current-vs-V_THGEM1 viewer (in `μA`). **Load CSV…** plots a saved run; load
+  several to **overlay** them (auto-legended by their `Ed`/`Ei` settings), toggle channels
+  (C/T1/B1/T2), and **Clear**. Tick **Follow active scan** to track the running scan's CSV live.
+  Plotting is decoupled from acquisition (the scan just writes CSV), mirroring
+  [CAEN-Plotly-Viewer-From-Log](https://github.com/weizmann-atlas/CAEN-Plotly-Viewer-From-Log).
 
 ## Run from source
 
