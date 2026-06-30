@@ -169,22 +169,38 @@ class MainWindowTabbedShellTests(unittest.TestCase):
         programs = [self.window.program_combo.itemText(i) for i in range(self.window.program_combo.count())]
         self.assertEqual(programs, ["THGEM voltage (gain)", "Drift field scan", "Induction field scan"])
 
-    def test_thgem_program_sweeps_voltage_and_disables_held_voltage(self) -> None:
+    def test_thgem_program_sweeps_b1_and_holds_t1(self) -> None:
         self.window.program_combo.setCurrentText("THGEM voltage (gain)")
         self.assertIs(self.window._current_scan_variable(), ScanVariable.THGEM_VOLTAGE)
         self.assertEqual(self.window.sweep_start_spin.suffix(), " V")
-        self.assertFalse(self.window.vhold_spin.isEnabled())  # V_THGEM1 is swept
-        self.assertTrue(self.window.drift_field_spin.isEnabled())  # held -> editable
+        self.assertEqual(self.window.sweep_start_label.text(), "B1 start")
+        self.assertFalse(self.window.b1_spin.isEnabled())  # B1 is swept by the gain program
+        self.assertTrue(self.window.t1_spin.isEnabled())   # T1 is always held
+        self.assertTrue(self.window.drift_field_spin.isEnabled())
+
+    def test_thgem_faces_show_polarity_prefixes(self) -> None:
+        self.assertEqual(self.window.t1_spin.prefix(), "−")
+        self.assertEqual(self.window.b1_spin.prefix(), "+")
 
     def test_drift_program_sets_kv_units_and_disables_drift_hold(self) -> None:
         self.window.program_combo.setCurrentText("Drift field scan")
         self.assertEqual(self.window.sweep_start_spin.suffix(), " kV/cm")
         self.assertEqual(self.window.sweep_start_label.text(), "E_drift start")
         self.assertFalse(self.window.drift_field_spin.isEnabled())  # E_drift is swept
-        self.assertTrue(self.window.vhold_spin.isEnabled())  # held -> editable
+        self.assertTrue(self.window.b1_spin.isEnabled())   # B1 held -> editable
+        self.assertTrue(self.window.t1_spin.isEnabled())   # T1 always held
         params = self.window._current_scan_parameters()
         self.assertIs(params.scan_variable, ScanVariable.DRIFT_FIELD)
         self.assertEqual(params.label, "Drift field scan")
+
+    def test_bias_preview_and_table_populate(self) -> None:
+        self.window.program_combo.setCurrentText("Drift field scan")
+        self.assertIn("C:", self.window.bias_preview_label.text())  # signed per-electrode preview
+        # Expanding the table fills one row per scan point.
+        self.window.bias_table_button.setChecked(True)
+        params = self.window._current_scan_parameters()
+        self.assertEqual(self.window.bias_table.rowCount(), len(params.scan_values()))
+        self.assertIsNotNone(self.window.bias_table.item(0, 1))  # C column populated
 
     def test_hardware_settings_defaults_match_usb_vcp_defaults(self) -> None:
         self.window.backend_combo.setCurrentText("CAEN USB-VCP")

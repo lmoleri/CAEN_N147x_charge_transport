@@ -32,19 +32,24 @@ A single window with four tabs:
   toggle, and `All ON`, `All OFF`, plus `Refresh Setpoints` reseed the editable boxes from the
   hardware. A footer on this tab shows the latest manual action or failure. Manual control is
   disabled while a scan runs.
-- **Scan** — pick a **scan program**, which selects *which* quantity is swept; the other two are
-  held at editable values, and every point is turned into all four electrode voltages (C/T1/B1/T2)
-  so the relevant electrode actually moves:
-    - **THGEM voltage (gain)** — sweeps **V_THGEM1** (across T1→B1); holds the drift and induction
-      fields. Units: V.
-    - **Drift field scan** — sweeps **E_drift** (moves the cathode C relative to T1); holds V_THGEM1
+- **Scan** — pick a **scan program**, which selects *which* quantity is swept; the others are held
+  at editable values, and every point is turned into all four electrode voltages (C/T1/B1/T2) so the
+  relevant electrode actually moves. The THGEM faces are explicit, settable biases — **T1** (top,
+  shown with a `−` prefix) and **B1** (bottom, `+`); their difference is the THGEM voltage
+  ΔV = |B1|+|T1|.
+    - **THGEM voltage (gain)** — sweeps **B1 (+)** while holding **T1 (−)**; holds the drift and
+      induction fields. Plotted against ΔV. Units: V.
+    - **Drift field scan** — sweeps **E_drift** (moves the cathode C relative to T1); holds T1, B1
       and the induction field. Units: kV/cm.
     - **Induction field scan** — sweeps **E_induction** / transfer field (moves T2 relative to B1);
-      holds V_THGEM1 and the drift field. Units: kV/cm.
+      holds T1, B1 and the drift field. Units: kV/cm.
 
-  The sweep start/stop/step relabels and switches units with the program, and the held box for the
-  swept quantity is greyed out. Gaps (drift C↔T1, induction B1↔T2), wait/point, and the UV-lamp flag
-  are editable. Start/Abort, with a run log; each run is written to a CSV under `measurements/`.
+  The sweep start/stop/step relabels and switches units with the program; the held box for whatever
+  is swept is greyed out (T1 is always editable). A live **electrode-bias preview** shows the signed
+  C/T1/B1/T2 values (held value or start→end range) plus the ΔV range, and **Show electrode bias
+  table** expands a per-point table of all four biases. Gaps (drift C↔T1, induction B1↔T2),
+  wait/point, and the UV-lamp flag are editable. Start/Abort, with a run log; each run is written to
+  a CSV under `measurements/`.
 - **Viewer** — a Plotly current viewer (in `μA`) whose **x-axis follows the swept variable** (THGEM
   voltage, drift field, or induction field). **Load CSV…** plots a saved run; load several of the
   *same* program to **overlay** them (auto-legended by their held quantities), toggle channels

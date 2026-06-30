@@ -39,11 +39,12 @@ from caen_interface import (
 from data_logger import DataLogger
 from plotly_view import PlotlyViewer
 from scan_controller import (
+    B1_HELD_DEFAULT_V,
     DEFAULT_WAIT_SECONDS,
     DRIFT_GAP_CM,
     INDUCTION_GAP_CM,
     SCAN_VARIABLE_SPECS,
-    VTHGEM1_HOLD_V,
+    T1_HELD_DEFAULT_V,
     VTHGEM1_START_V,
     VTHGEM1_STEP_V,
     VTHGEM1_STOP_V,
@@ -440,12 +441,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.program_combo = QtWidgets.QComboBox()
         self.program_combo.addItems(self.controller.preset_names())
 
-        def _spin(minimum, maximum, decimals, step, value, suffix):
+        def _spin(minimum, maximum, decimals, step, value, suffix, prefix=""):
             box = QtWidgets.QDoubleSpinBox()
             box.setRange(minimum, maximum)
             box.setDecimals(decimals)
             box.setSingleStep(step)
             box.setSuffix(suffix)
+            if prefix:
+                box.setPrefix(prefix)
             box.setKeyboardTracking(False)
             box.setValue(value)
             return box
@@ -455,16 +458,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sweep_stop_spin = _spin(0.0, 5000.0, 0, 25.0, VTHGEM1_STOP_V, " V")
         self.sweep_step_spin = _spin(1.0, 1000.0, 0, 5.0, VTHGEM1_STEP_V, " V")
         self.wait_spin = _spin(0.0, 600.0, 1, 0.5, DEFAULT_WAIT_SECONDS, " s")
-        # Held values for the two quantities not being swept (the swept one's box
-        # is auto-disabled by _apply_held_enabled).
-        self.vhold_spin = _spin(0.0, 5000.0, 0, 25.0, VTHGEM1_HOLD_V, " V")
+        # THGEM faces — polarity-signed magnitudes (the "−"/"+" prefix shows the
+        # applied sign; the value is a magnitude). T1 is always held; B1 is held
+        # except in the gain scan, where it is swept. The swept box is auto-disabled.
+        self.t1_spin = _spin(0.0, 5000.0, 0, 25.0, T1_HELD_DEFAULT_V, " V", prefix="−")
+        self.b1_spin = _spin(0.0, 5000.0, 0, 25.0, B1_HELD_DEFAULT_V, " V", prefix="+")
         self.drift_field_spin = _spin(-50.0, 50.0, 2, 0.1, 0.0, " kV/cm")
         self.drift_gap_spin = _spin(0.01, 100.0, 2, 0.1, DRIFT_GAP_CM, " cm")
         self.induction_field_spin = _spin(-50.0, 50.0, 2, 0.1, 1.0, " kV/cm")
         self.induction_gap_spin = _spin(0.01, 100.0, 2, 0.05, INDUCTION_GAP_CM, " cm")
         self._scan_spins = (
             self.sweep_start_spin, self.sweep_stop_spin, self.sweep_step_spin, self.wait_spin,
-            self.vhold_spin, self.drift_field_spin, self.drift_gap_spin,
+            self.t1_spin, self.b1_spin, self.drift_field_spin, self.drift_gap_spin,
             self.induction_field_spin, self.induction_gap_spin,
         )
 
@@ -475,6 +480,25 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.scan_summary_label = QtWidgets.QLabel()
         self.scan_summary_label.setWordWrap(True)
+
+        # Computed electrode biases (signed) — compact range always visible plus a
+        # collapsible per-point table.
+        self.bias_preview_label = QtWidgets.QLabel()
+        self.bias_preview_label.setWordWrap(True)
+        self.bias_preview_label.setStyleSheet("font-family: monospace;")
+        self._bias_table_expanded = False
+        self.bias_table_button = QtWidgets.QPushButton("Show electrode bias table")
+        self.bias_table_button.setCheckable(True)
+        self.bias_table_button.toggled.connect(self._on_bias_table_toggled)
+        self.bias_table = QtWidgets.QTableWidget(0, 6)
+        self.bias_table.setHorizontalHeaderLabels(["Sweep", "C [V]", "T1 [V]", "B1 [V]", "T2 [V]", "ΔV [V]"])
+        self.bias_table.verticalHeader().setVisible(False)
+        self.bias_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.bias_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.bias_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        self.bias_table.setMaximumHeight(220)
+        self.bias_table.setVisible(False)
+
         self.output_path_label = QtWidgets.QLabel(f"CSV output: {self.base_dir / 'measurements'}")
         self.output_path_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
 
@@ -508,8 +532,10 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(QtWidgets.QLabel("Wait / point"), r, 2)
         layout.addWidget(self.wait_spin, r, 3)
         r += 1
-        layout.addWidget(QtWidgets.QLabel("V_THGEM1 (held)"), r, 0)
-        layout.addWidget(self.vhold_spin, r, 1)
+        layout.addWidget(QtWidgets.QLabel("T1 top face (−)"), r, 0)
+        layout.addWidget(self.t1_spin, r, 1)
+        layout.addWidget(QtWidgets.QLabel("B1 bottom face (+)"), r, 2)
+        layout.addWidget(self.b1_spin, r, 3)
         r += 1
         layout.addWidget(QtWidgets.QLabel("Drift field"), r, 0)
         layout.addWidget(self.drift_field_spin, r, 1)
@@ -524,6 +550,12 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.uv_check, r, 0, 1, 4)
         r += 1
         layout.addWidget(self.scan_summary_label, r, 0, 1, 4)
+        r += 1
+        layout.addWidget(self.bias_preview_label, r, 0, 1, 4)
+        r += 1
+        layout.addWidget(self.bias_table_button, r, 0, 1, 4)
+        r += 1
+        layout.addWidget(self.bias_table, r, 0, 1, 4)
         r += 1
         layout.addWidget(self.output_path_label, r, 0, 1, 4)
         layout.setColumnStretch(1, 1)
@@ -744,7 +776,8 @@ class MainWindow(QtWidgets.QMainWindow):
             start=self.sweep_start_spin.value(),
             stop=self.sweep_stop_spin.value(),
             step=self.sweep_step_spin.value(),
-            v_thgem1_v=self.vhold_spin.value(),
+            t1_v=self.t1_spin.value(),
+            b1_v=self.b1_spin.value(),
             drift_field_kv_cm=self.drift_field_spin.value(),
             induction_field_kv_cm=self.induction_field_spin.value(),
             drift_gap_cm=self.drift_gap_spin.value(),
@@ -754,7 +787,64 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _update_scan_summary(self) -> None:
-        self.scan_summary_label.setText(self._current_scan_parameters().describe())
+        params = self._current_scan_parameters()
+        self.scan_summary_label.setText(params.describe())
+        self._update_bias_preview(params)
+        self._update_bias_table(params)
+
+    @staticmethod
+    def _fmt_signed(value: float) -> str:
+        return f"{value:+.0f}"
+
+    def _update_bias_preview(self, params: ScanParameters) -> None:
+        """Compact, signed per-electrode biases: a held value, or start→end for
+        whatever the program moves, plus the ΔV range."""
+        values = params.scan_values()
+        if not values:
+            self.bias_preview_label.setText("")
+            return
+        first, last = params.signed_solve(values[0]), params.signed_solve(values[-1])
+
+        def cell(label: str) -> str:
+            a, b = first[label], last[label]
+            if abs(a - b) < 1e-6:
+                return f"{label}: {self._fmt_signed(a)} V"
+            return f"{label}: {self._fmt_signed(a)}→{self._fmt_signed(b)} V"
+
+        dv0 = params.thgem_voltage_at(values[0])
+        dv1 = params.thgem_voltage_at(values[-1])
+        dv = f"ΔV: {dv0:.0f} V" if abs(dv0 - dv1) < 1e-6 else f"ΔV: {dv0:.0f}→{dv1:.0f} V"
+        electrodes = "   ".join(cell(label) for label in CHANNEL_LABELS)
+        self.bias_preview_label.setText(f"Electrode biases →   {electrodes}   {dv}")
+
+    def _update_bias_table(self, params: ScanParameters) -> None:
+        if not self._bias_table_expanded:
+            return  # rebuilt on demand when expanded
+        values = params.scan_values()
+        spec = params.spec
+        self.bias_table.setHorizontalHeaderLabels(
+            [f"{spec.symbol} [{spec.unit}]", "C [V]", "T1 [V]", "B1 [V]", "T2 [V]", "ΔV [V]"]
+        )
+        self.bias_table.setRowCount(len(values))
+        for row, swept in enumerate(values):
+            signed = params.signed_solve(swept)
+            cells = [
+                f"{swept:g}",
+                self._fmt_signed(signed["C"]),
+                self._fmt_signed(signed["T1"]),
+                self._fmt_signed(signed["B1"]),
+                self._fmt_signed(signed["T2"]),
+                f"{params.thgem_voltage_at(swept):.0f}",
+            ]
+            for col, text in enumerate(cells):
+                self.bias_table.setItem(row, col, QtWidgets.QTableWidgetItem(text))
+
+    def _on_bias_table_toggled(self, checked: bool) -> None:
+        self._bias_table_expanded = checked
+        self.bias_table.setVisible(checked)
+        self.bias_table_button.setText("Hide electrode bias table" if checked else "Show electrode bias table")
+        if checked:
+            self._update_bias_table(self._current_scan_parameters())
 
     def _configure_sweep_spins(self, scan_variable: ScanVariable) -> None:
         """Retarget the sweep boxes to the program's units/range and relabel them."""
@@ -783,10 +873,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sweep_step_label.setText(f"{spec.symbol} step")
 
     def _apply_held_enabled(self) -> None:
-        """Grey out the held box of whatever quantity the program sweeps."""
+        """Grey out the held box of whatever quantity the program sweeps. T1 is
+        always held; B1 is swept by the gain program."""
         base = not self.scan_running
         var = self._current_scan_variable()
-        self.vhold_spin.setEnabled(base and var is not ScanVariable.THGEM_VOLTAGE)
+        self.t1_spin.setEnabled(base)
+        self.b1_spin.setEnabled(base and var is not ScanVariable.THGEM_VOLTAGE)
         self.drift_field_spin.setEnabled(base and var is not ScanVariable.DRIFT_FIELD)
         self.induction_field_spin.setEnabled(base and var is not ScanVariable.INDUCTION_FIELD)
 
@@ -801,7 +893,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.sweep_stop_spin.setValue(params.stop)
             self.sweep_step_spin.setValue(params.step)
             self.wait_spin.setValue(params.wait_seconds)
-            self.vhold_spin.setValue(params.v_thgem1_v)
+            self.t1_spin.setValue(params.t1_v)
+            self.b1_spin.setValue(params.b1_v)
             self.drift_field_spin.setValue(params.drift_field_kv_cm)
             self.drift_gap_spin.setValue(params.drift_gap_cm)
             self.induction_field_spin.setValue(params.induction_field_kv_cm)

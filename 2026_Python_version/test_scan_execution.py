@@ -51,29 +51,30 @@ class ScanExecutionTests(unittest.TestCase):
     def test_custom_range_changes_point_count(self) -> None:
         params = ScanParameters(
             label="Short", scan_variable=ScanVariable.THGEM_VOLTAGE,
-            start=200, stop=300, step=50, wait_seconds=0.0,
+            start=200, stop=300, step=50, t1_v=50.0, wait_seconds=0.0,
         )
         row_count, records = self._run(params)
-        self.assertEqual(row_count, 3)  # 200, 250, 300
-        self.assertEqual(records[0].v_thgem1_v, 200.0)
-        self.assertEqual(records[-1].v_thgem1_v, 300.0)
+        self.assertEqual(row_count, 3)  # B1 = 200, 250, 300
+        # recorded v_thgem1_v = ΔV = B1 + T1(50)
+        self.assertEqual(records[0].v_thgem1_v, 250.0)
+        self.assertEqual(records[-1].v_thgem1_v, 350.0)
 
     def test_drift_scan_sweeps_field_and_holds_thgem_voltage(self) -> None:
         params = ScanParameters(
             label="Drift", scan_variable=ScanVariable.DRIFT_FIELD,
-            start=0.0, stop=1.0, step=0.5, v_thgem1_v=700.0, induction_field_kv_cm=1.0, wait_seconds=0.0,
+            start=0.0, stop=1.0, step=0.5, t1_v=300.0, b1_v=400.0, induction_field_kv_cm=1.0, wait_seconds=0.0,
         )
         row_count, records = self._run(params)
         self.assertEqual(row_count, 3)  # 0.0, 0.5, 1.0
         self.assertEqual([round(r.e_drift_kv_cm, 3) for r in records], [0.0, 0.5, 1.0])
-        self.assertTrue(all(r.v_thgem1_v == 700.0 for r in records))  # THGEM voltage held
+        self.assertTrue(all(r.v_thgem1_v == 700.0 for r in records))  # ΔV = B1+T1 held
         self.assertTrue(all(r.e_transfer_kv_cm == 1.0 for r in records))  # induction held
         self.assertTrue(all(r.scan_variable == "drift_field" for r in records))
 
     def test_induction_scan_records_carry_swept_field(self) -> None:
         params = ScanParameters(
             label="Induction", scan_variable=ScanVariable.INDUCTION_FIELD,
-            start=0.0, stop=2.0, step=1.0, v_thgem1_v=700.0, drift_field_kv_cm=0.5, wait_seconds=0.0,
+            start=0.0, stop=2.0, step=1.0, t1_v=300.0, b1_v=400.0, drift_field_kv_cm=0.5, wait_seconds=0.0,
         )
         _, records = self._run(params)
         self.assertEqual([round(r.e_transfer_kv_cm, 3) for r in records], [0.0, 1.0, 2.0])

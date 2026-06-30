@@ -29,12 +29,13 @@ class SeriesFromCsvTests(unittest.TestCase):
         with TemporaryDirectory() as td:
             params = ScanParameters(
                 label="THGEM", scan_variable=ScanVariable.THGEM_VOLTAGE,
-                start=150, stop=250, step=50, drift_field_kv_cm=0.4, induction_field_kv_cm=2.0,
+                start=150, stop=250, step=50, t1_v=50.0, drift_field_kv_cm=0.4, induction_field_kv_cm=2.0,
                 wait_seconds=0.0,
             )
             series = series_from_csv(_run_to_csv(td, params))
 
-        self.assertEqual(series["x"], [150.0, 200.0, 250.0])
+        # gain sweeps B1 (150→250); recorded/plotted x is ΔV = B1 + T1(50)
+        self.assertEqual(series["x"], [200.0, 250.0, 300.0])
         self.assertEqual(series["axis_title"], "THGEM1 voltage [V]")
         self.assertEqual(set(series["channels"]), set(CHANNEL_LABELS))
         self.assertEqual(len(series["channels"]["C"]), 3)
@@ -45,7 +46,7 @@ class SeriesFromCsvTests(unittest.TestCase):
         with TemporaryDirectory() as td:
             params = ScanParameters(
                 label="Drift", scan_variable=ScanVariable.DRIFT_FIELD,
-                start=0.0, stop=1.0, step=0.5, v_thgem1_v=700.0, induction_field_kv_cm=1.0,
+                start=0.0, stop=1.0, step=0.5, t1_v=300.0, b1_v=400.0, induction_field_kv_cm=1.0,
                 wait_seconds=0.0,
             )
             series = series_from_csv(_run_to_csv(td, params))

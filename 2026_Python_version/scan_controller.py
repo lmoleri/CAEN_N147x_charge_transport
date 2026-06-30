@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Callable
 
 from caen_interface import (
+    CHANNEL_BY_LABEL,
     CHANNEL_LABELS,
     BaseCaenInterface,
     FieldConfig,
@@ -16,15 +17,15 @@ from caen_interface import (
 )
 
 # Defaults (also used to seed the editable Scan-tab fields).
-VTHGEM1_START_V = 150.0
+VTHGEM1_START_V = 150.0   # gain-scan B1 (+) sweep range, in V
 VTHGEM1_STOP_V = 1500.0
 VTHGEM1_STEP_V = 25.0
-VTHGEM1_HOLD_V = 700.0  # operating THGEM voltage held during a field scan
+T1_HELD_DEFAULT_V = 300.0  # THGEM top face T1 (negative polarity) — held magnitude
+B1_HELD_DEFAULT_V = 400.0  # THGEM bottom face B1 (positive polarity) — held magnitude
 
 DRIFT_GAP_CM = 0.5
 INDUCTION_GAP_CM = 0.1  # gap between THGEM1 bottom (B1) and the top electrode (T2)
 MIN_HV_V = 1.0
-T1_ANCHOR_V = 1.0
 DEFAULT_WAIT_SECONDS = 7.0
 
 
@@ -45,7 +46,7 @@ class VariableSpec:
 
 
 SCAN_VARIABLE_SPECS: dict[ScanVariable, VariableSpec] = {
-    ScanVariable.THGEM_VOLTAGE: VariableSpec("V_THGEM1", "V", "v_thgem1_v", "THGEM1 voltage [V]"),
+    ScanVariable.THGEM_VOLTAGE: VariableSpec("B1", "V", "v_thgem1_v", "THGEM1 voltage [V]"),
     ScanVariable.DRIFT_FIELD: VariableSpec("E_drift", "kV/cm", "e_drift_kv_cm", "Drift field [kV/cm]"),
     ScanVariable.INDUCTION_FIELD: VariableSpec("E_induction", "kV/cm", "e_transfer_kv_cm", "Induction field [kV/cm]"),
 }
@@ -67,17 +68,19 @@ def variable_spec_for(value: str | ScanVariable) -> VariableSpec:
 
 @dataclass(frozen=True)
 class ScanParameters:
-    """A single-curve scan that sweeps one quantity while holding the other two.
+    """A single-curve scan that sweeps one quantity while holding the others.
 
     Geometry:  C ──drift gap── T1 ─[THGEM1]─ B1 ──induction gap── T2
-      V_THGEM1    = V_B1 − V_T1                        (THGEM multiplication voltage)
-      E_drift     = (V_C  − V_T1) / drift_gap          (cathode ↔ THGEM top)
-      E_induction = (V_T2 − V_B1) / induction_gap      (THGEM bottom ↔ top electrode)
+    The THGEM faces are explicit, settable biases (magnitudes): **T1** (negative
+    polarity) and **B1** (positive polarity). Derived quantities:
+      ΔV_THGEM    = V_B1 − V_T1 = |B1| + |T1|          (THGEM multiplication voltage)
+      E_drift     = relates the cathode C to T1 / drift_gap
+      E_induction = relates the top electrode T2 to B1 / induction_gap
 
-    ``scan_variable`` selects which of the three is swept over ``start → stop`` in
-    ``step`` increments; the other two are held at the values below. Every point is
-    turned into all four electrode voltages by :meth:`solve`, so e.g. a drift scan
-    moves only the cathode (C) while V_THGEM1 and the induction electrode hold.
+    ``scan_variable`` selects what is swept over ``start → stop`` in ``step``
+    increments: the **gain** program sweeps **B1** (holding T1); the field programs
+    sweep their field. The other quantities are held at the values below. T1 is
+    always held. :meth:`solve` turns each point into all four electrode magnitudes.
     """
 
     label: str = "THGEM voltage"
@@ -85,7 +88,8 @@ class ScanParameters:
     start: float = VTHGEM1_START_V
     stop: float = VTHGEM1_STOP_V
     step: float = VTHGEM1_STEP_V
-    v_thgem1_v: float = VTHGEM1_HOLD_V          # held when sweeping a field
+    t1_v: float = T1_HELD_DEFAULT_V             # THGEM top (−) magnitude, always held
+    b1_v: float = B1_HELD_DEFAULT_V             # THGEM bottom (+) magnitude, held unless swept (gain)
     drift_field_kv_cm: float = 0.0              # held when not the swept variable
     induction_field_kv_cm: float = 1.0          # held when not the swept variable
     drift_gap_cm: float = DRIFT_GAP_CM
@@ -112,40 +116,57 @@ class ScanParameters:
         count = int(math.floor(abs(stop - start) / step + 1e-9)) + 1
         return tuple(round(start + direction * step * i, 6) for i in range(count))
 
-    def point_fields(self, swept_value: float) -> tuple[float, float, float]:
-        """Return (V_THGEM1, E_drift, E_induction) at a swept value: the held trio
-        with the swept variable overridden."""
-        v_thgem1 = self.v_thgem1_v
+    def point_state(self, swept_value: float) -> tuple[float, float, float, float]:
+        """Return (T1, B1, E_drift, E_induction) at a swept value: the held values
+        with the swept variable overridden. The gain program sweeps B1 (the positive
+        THGEM face); the field programs sweep their field. T1 is always held."""
+        t1 = self.t1_v
+        b1 = self.b1_v
         e_drift = self.drift_field_kv_cm
         e_induction = self.induction_field_kv_cm
         if self.scan_variable is ScanVariable.THGEM_VOLTAGE:
-            v_thgem1 = swept_value
+            b1 = swept_value
         elif self.scan_variable is ScanVariable.DRIFT_FIELD:
             e_drift = swept_value
         else:
             e_induction = swept_value
-        return v_thgem1, e_drift, e_induction
+        return t1, b1, e_drift, e_induction
 
     def solve(self, swept_value: float) -> dict[str, float]:
-        v_thgem1, e_drift, e_induction = self.point_fields(swept_value)
-        t1_v = T1_ANCHOR_V
-        b1_v = max(MIN_HV_V, v_thgem1 - t1_v)
-        c_v = max(MIN_HV_V, t1_v + e_drift * 1000.0 * self.drift_gap_cm)
-        t2_v = max(MIN_HV_V, b1_v + e_induction * 1000.0 * self.induction_gap_cm)
+        """Electrode magnitudes (V). Polarity is applied elsewhere: C/T1 are negative,
+        B1/T2 positive. C tracks E_drift off T1; T2 tracks E_induction off B1."""
+        t1, b1, e_drift, e_induction = self.point_state(swept_value)
+        t1_v = max(MIN_HV_V, t1)
+        b1_v = max(MIN_HV_V, b1)
+        c_v = max(MIN_HV_V, t1 + e_drift * 1000.0 * self.drift_gap_cm)
+        t2_v = max(MIN_HV_V, b1 + e_induction * 1000.0 * self.induction_gap_cm)
         return {"C": c_v, "T1": t1_v, "B1": b1_v, "T2": t2_v}
+
+    def signed_solve(self, swept_value: float) -> dict[str, float]:
+        """:meth:`solve` with each magnitude given its electrode's polarity sign."""
+        return {
+            label: (mag if CHANNEL_BY_LABEL[label].polarity == "+" else -mag)
+            for label, mag in self.solve(swept_value).items()
+        }
+
+    def thgem_voltage_at(self, swept_value: float) -> float:
+        """ΔV across the THGEM = V_B1 − V_T1 = |B1| + |T1| (applied magnitudes)."""
+        solved = self.solve(swept_value)
+        return solved["B1"] + solved["T1"]
 
     def field_config_at(self, swept_value: float) -> FieldConfig:
         # The Simulation backend reads e_drift/e_transfer to model the current.
-        _, e_drift, e_induction = self.point_fields(swept_value)
+        _, _, e_drift, e_induction = self.point_state(swept_value)
         return FieldConfig(self.label, e_drift, e_induction, self.uv_expected)
 
     def legend_label(self) -> str:
         """Distinguish curves within a same-program overlay by the held quantities."""
+        delta_v = self.b1_v + self.t1_v
         if self.scan_variable is ScanVariable.THGEM_VOLTAGE:
             return f"Ed={self.drift_field_kv_cm:g}, Ei={self.induction_field_kv_cm:g} kV/cm"
         if self.scan_variable is ScanVariable.DRIFT_FIELD:
-            return f"V_THGEM1={self.v_thgem1_v:g} V, Ei={self.induction_field_kv_cm:g} kV/cm"
-        return f"V_THGEM1={self.v_thgem1_v:g} V, Ed={self.drift_field_kv_cm:g} kV/cm"
+            return f"V_THGEM1={delta_v:g} V, Ei={self.induction_field_kv_cm:g} kV/cm"
+        return f"V_THGEM1={delta_v:g} V, Ed={self.drift_field_kv_cm:g} kV/cm"
 
     def describe(self) -> str:
         spec = self.spec
@@ -153,8 +174,9 @@ class ScanParameters:
             f"{spec.symbol} {self.start:g} → {self.stop:g} {spec.unit} "
             f"step {self.step:g} {spec.unit} ({len(self.scan_values())} pts)"
         ]
+        parts.append(f"T1 −{self.t1_v:g} V (held)")
         if self.scan_variable is not ScanVariable.THGEM_VOLTAGE:
-            parts.append(f"V_THGEM1 {self.v_thgem1_v:g} V (held)")
+            parts.append(f"B1 +{self.b1_v:g} V (held) → ΔV {self.b1_v + self.t1_v:g} V")
         if self.scan_variable is not ScanVariable.DRIFT_FIELD:
             parts.append(f"E_drift {self.drift_field_kv_cm:g} kV/cm (gap {self.drift_gap_cm:g} cm)")
         if self.scan_variable is not ScanVariable.INDUCTION_FIELD:
@@ -170,19 +192,22 @@ PRESETS: dict[str, ScanParameters] = {
         label="THGEM voltage",
         scan_variable=ScanVariable.THGEM_VOLTAGE,
         start=VTHGEM1_START_V, stop=VTHGEM1_STOP_V, step=VTHGEM1_STEP_V,
-        v_thgem1_v=VTHGEM1_HOLD_V, drift_field_kv_cm=0.0, induction_field_kv_cm=1.0,
+        t1_v=T1_HELD_DEFAULT_V, b1_v=B1_HELD_DEFAULT_V,
+        drift_field_kv_cm=0.0, induction_field_kv_cm=1.0,
     ),
     "Drift field scan": ScanParameters(
         label="Drift field",
         scan_variable=ScanVariable.DRIFT_FIELD,
         start=0.0, stop=2.0, step=0.1,
-        v_thgem1_v=VTHGEM1_HOLD_V, drift_field_kv_cm=0.0, induction_field_kv_cm=1.0,
+        t1_v=T1_HELD_DEFAULT_V, b1_v=B1_HELD_DEFAULT_V,
+        drift_field_kv_cm=0.0, induction_field_kv_cm=1.0,
     ),
     "Induction field scan": ScanParameters(
         label="Induction field",
         scan_variable=ScanVariable.INDUCTION_FIELD,
         start=0.0, stop=4.0, step=0.2,
-        v_thgem1_v=VTHGEM1_HOLD_V, drift_field_kv_cm=0.5, induction_field_kv_cm=0.0,
+        t1_v=T1_HELD_DEFAULT_V, b1_v=B1_HELD_DEFAULT_V,
+        drift_field_kv_cm=0.5, induction_field_kv_cm=0.0,
     ),
 }
 
@@ -228,7 +253,8 @@ class ScanController:
                 self._handle_abort(interface, callbacks)
                 return RunResult(False, True, "Scan aborted safely.")
 
-            v_thgem1_v, e_drift, e_induction = params.point_fields(float(swept_value))
+            _, _, e_drift, e_induction = params.point_state(float(swept_value))
+            v_thgem1_v = params.thgem_voltage_at(float(swept_value))
             interface.set_measurement_context(params.field_config_at(float(swept_value)), v_thgem1_v)
             interface.set_channel_voltages(params.solve(float(swept_value)))
 
