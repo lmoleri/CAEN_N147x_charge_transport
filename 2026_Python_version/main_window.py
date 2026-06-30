@@ -226,7 +226,8 @@ class ScanWorker(QtCore.QObject):
             action()
             self.log_message.emit(message)
             self.channel_status.emit(message)
-            self.channel_refresh.emit(self.backend.read_all_channels())
+            # Monitors (VMon/IMon) refresh on the next poll tick — don't pay a slow
+            # read_all_channels() per command, which compounds on rapid clicks.
             if refresh_controls:
                 self.control_refresh.emit(self.backend.read_channel_controls())
         except Exception as exc:  # pragma: no cover - hardware-dependent
@@ -264,6 +265,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.controller = ScanController()
         self.connected_backend = False
         self.scan_running = False
+        self._refresh_in_flight = False  # cap outstanding poll refreshes at one
 
         self.setWindowTitle("THGEM Exercise 3.B School GUI")
         self.resize(1360, 880)
@@ -776,7 +778,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.disconnect_requested.emit()
 
     def _queue_refresh(self) -> None:
-        if self.connected_backend and not self.scan_running:
+        # Skip if the previous refresh is still being processed: on slow hardware
+        # a full read can take longer than the poll interval, and queuing more
+        # would back up the worker — delaying manual commands by minutes.
+        if self.connected_backend and not self.scan_running and not self._refresh_in_flight:
+            self._refresh_in_flight = True
             self.refresh_requested.emit()
 
     def _queue_refresh_controls(self) -> None:
@@ -843,11 +849,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._on_channel_refresh(snapshots)
         self._on_control_refresh(controls)
         self._set_channels_status("Connected.")
+        self._refresh_in_flight = False
         self.poll_timer.start()
 
     def _on_disconnected(self, message: str) -> None:
         self.connected_backend = False
         self.scan_running = False
+        self._refresh_in_flight = False
         self.poll_timer.stop()
         self._set_connection_state(False)
         self._set_scan_state(False)
@@ -856,6 +864,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(message, 4000)
 
     def _on_channel_refresh(self, snapshots: object) -> None:
+        self._refresh_in_flight = False  # a poll/command read came back; allow the next poll
         if not isinstance(snapshots, (list, tuple)):
             return
         for snapshot in snapshots:
@@ -945,6 +954,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # A manual command may have failed; drop optimistic power states so the
         # next read-back shows the true hardware state.
         self._pending_power.clear()
+        self._refresh_in_flight = False  # release the poll guard if a refresh errored
         self._append_log(message)
         self.statusBar().showMessage(message, 6000)
         QtWidgets.QMessageBox.warning(self, "Error", message)

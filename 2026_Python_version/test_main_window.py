@@ -142,6 +142,28 @@ class MainWindowTabbedShellTests(unittest.TestCase):
         self.assertEqual(cells["power"].text(), "ON")
         self.assertNotIn("C", self.window._pending_power)
 
+    def test_poll_refresh_is_throttled_to_one_in_flight(self) -> None:
+        # On slow hardware a full read can outlast the 1 s poll; the guard keeps
+        # only one refresh outstanding so manual commands don't queue behind a
+        # growing backlog (which delayed on/off by minutes).
+        self.window.connected_backend = True
+        self.window.scan_running = False
+        self.window._refresh_in_flight = False
+        emitted: list[int] = []
+        self.window.refresh_requested.connect(lambda: emitted.append(1))
+
+        self.window._queue_refresh()  # emits once, marks in-flight
+        self.window._queue_refresh()  # suppressed while a refresh is outstanding
+        self.window._queue_refresh()  # suppressed while a refresh is outstanding
+        self.assertEqual(len(emitted), 1)
+        self.assertTrue(self.window._refresh_in_flight)
+
+        # A read coming back releases the guard so the next poll tick can fire.
+        self.window._on_channel_refresh([])
+        self.assertFalse(self.window._refresh_in_flight)
+        self.window._queue_refresh()
+        self.assertEqual(len(emitted), 2)
+
     def test_hardware_settings_defaults_match_usb_vcp_defaults(self) -> None:
         self.window.backend_combo.setCurrentText("CAEN USB-VCP")
 
