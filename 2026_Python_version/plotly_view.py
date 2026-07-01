@@ -235,9 +235,10 @@ class PlotlyViewer(QtWidgets.QWidget):
 
     def _ensure_page(self) -> None:
         if self._page is None:
-            self._placeholder.hide()
-            self._page = _PlotPage()
-            self._layout.addWidget(self._page)
+            page = _PlotPage()  # may raise if plotly/QtWebEngine cannot initialise
+            self._layout.addWidget(page)
+            self._page = page
+            self._placeholder.hide()  # only hide once the page really exists
 
     def load_files(self, paths) -> None:
         for path in paths:
@@ -302,7 +303,12 @@ class PlotlyViewer(QtWidgets.QWidget):
             if self._page is not None:
                 self._page.run_js("clearAll();")
             return
-        self._ensure_page()
+        try:
+            self._ensure_page()
+        except Exception as exc:  # e.g. plotly data missing in a broken bundle
+            self._placeholder.setText(f"Plot unavailable: {exc}")
+            self._placeholder.show()
+            return
         self._page.run_js("clearAll();")
         multi = len(series_list) > 1
         for series in series_list:

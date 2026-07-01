@@ -87,5 +87,16 @@ class PlotlyViewerLazyTests(unittest.TestCase):
         viewer.deleteLater()
 
 
+class PlotlyDataTests(unittest.TestCase):
+    def test_plotly_js_data_is_available(self) -> None:
+        # The Viewer serves this at runtime; if plotly's package data is missing
+        # (e.g. not bundled into the frozen exe) the embedded plot renders blank.
+        from plotly import offline
+
+        plotly_js = offline.get_plotlyjs()
+        self.assertIsInstance(plotly_js, str)
+        self.assertGreater(len(plotly_js), 100_000)
+
+
 if __name__ == "__main__":
     unittest.main()
