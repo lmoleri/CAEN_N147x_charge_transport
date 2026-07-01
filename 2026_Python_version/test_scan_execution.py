@@ -140,6 +140,15 @@ class ScanExecutionTests(unittest.TestCase):
         backend.set_ramp_rates(300.0, 300.0)
         backend.power_on_channels(["B1", "T2"])  # leave C and T1 OFF
 
+        driven: set = set()
+        original = backend.set_channel_voltages
+
+        def spy(mapping):
+            driven.update(mapping.keys())
+            original(mapping)
+
+        backend.set_channel_voltages = spy
+
         controller = ScanController()
         logger = DataLogger(self.output_dir)
         params = ScanParameters(
@@ -151,14 +160,30 @@ class ScanExecutionTests(unittest.TestCase):
         logger.close()
 
         self.assertTrue(result.success)
-        # OFF channels were never driven → still at the connect() default (1.0 V).
-        self.assertEqual(backend._channel_state["C"]["voltage_v"], 1.0)
-        self.assertEqual(backend._channel_state["T1"]["voltage_v"], 1.0)
-        # ON channels were driven to the last point's setpoints (B1 swept to 300).
-        self.assertEqual(backend._channel_state["B1"]["voltage_v"], 300.0)
-        self.assertGreater(backend._channel_state["T2"]["voltage_v"], 1.0)
+        self.assertEqual(driven, {"B1", "T2"})  # only the powered channels were ever driven
         with csv_path.open("r", newline="", encoding="utf-8") as handle:
             self.assertEqual(sum(1 for _ in csv.DictReader(handle)), 3)
+
+    def test_scan_parks_channels_at_1v_on_completion(self) -> None:
+        backend = SimulationInterface(seed=7)
+        backend.connect()
+        backend.set_ramp_rates(300.0, 300.0)
+        backend.power_on_channels(CHANNEL_LABELS)
+
+        controller = ScanController()
+        logger = DataLogger(self.output_dir)
+        params = ScanParameters(
+            label="THGEM", scan_variable=ScanVariable.THGEM_VOLTAGE,
+            start=200, stop=300, step=50, wait_seconds=0.0,
+        )
+        logger.open_run(params.label)
+        result = controller.run_scan(backend, params, logger, ScanCallbacks(), threading.Event())
+        logger.close()
+
+        self.assertTrue(result.success)
+        for label in CHANNEL_LABELS:  # ramped to 1 V but left ON
+            self.assertEqual(backend._channel_state[label]["voltage_v"], 1.0)
+            self.assertTrue(backend._channel_state[label]["is_on"])
 
 
 if __name__ == "__main__":

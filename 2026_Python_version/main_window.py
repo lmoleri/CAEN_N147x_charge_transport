@@ -1101,6 +1101,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.channels_status_label.setText(message)
 
     def _on_scan_prepared(self, params: object, csv_path: str) -> None:
+        self.follow_check.setChecked(True)  # show the plot live in the Viewer automatically
         self.viewer.set_active_csv(csv_path)
         self.output_path_label.setText(f"CSV output: {csv_path}")
         self.scan_running = True

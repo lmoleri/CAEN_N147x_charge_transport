@@ -289,6 +289,11 @@ class ScanController:
             if callbacks.on_point_recorded is not None:
                 callbacks.on_point_recorded(record)
 
+        self._park_channels(
+            interface, callbacks, active, power_off=False,
+            lead_message="Scan complete. Returning scanned channels to 1 V.",
+            done_message="Scan complete. Channels parked at 1 V.",
+        )
         return RunResult(True, False, f"{params.label} scan completed.")
 
     def _wait_for_settle(self, wait_seconds: float, abort_event: threading.Event) -> bool:
@@ -303,8 +308,26 @@ class ScanController:
         return not abort_event.is_set()
 
     def _handle_abort(self, interface: BaseCaenInterface, callbacks: ScanCallbacks, active: list[str]) -> None:
+        self._park_channels(
+            interface, callbacks, active, power_off=True,
+            lead_message="Abort requested. Returning scanned channels to 1 V.",
+            done_message="Abort sequence complete. Channels are OFF.",
+        )
+
+    def _park_channels(
+        self,
+        interface: BaseCaenInterface,
+        callbacks: ScanCallbacks,
+        active: list[str],
+        *,
+        power_off: bool,
+        lead_message: str,
+        done_message: str,
+    ) -> None:
+        """Ramp the given channels down to 1 V (and optionally power them off),
+        refreshing monitors until they settle. Shared by normal completion and abort."""
         if callbacks.on_status_message is not None:
-            callbacks.on_status_message("Abort requested. Returning scanned channels to 1 V.")
+            callbacks.on_status_message(lead_message)
         interface.safe_shutdown(active)
 
         deadline = time.monotonic() + 15.0
@@ -316,9 +339,10 @@ class ScanController:
                 break
             time.sleep(0.25)
 
-        interface.power_off_channels(active)
+        if power_off:
+            interface.power_off_channels(active)
         snapshots = interface.read_all_channels()
         if callbacks.on_channel_refresh is not None:
             callbacks.on_channel_refresh(snapshots)
         if callbacks.on_status_message is not None:
-            callbacks.on_status_message("Abort sequence complete. Channels are OFF.")
+            callbacks.on_status_message(done_message)

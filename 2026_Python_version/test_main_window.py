@@ -246,6 +246,17 @@ class MainWindowTabbedShellTests(unittest.TestCase):
             self.window._queue_start_scan()
         self.assertEqual(emitted, [1])  # confirmed → scan launched
 
+    def test_scan_start_enables_live_follow(self) -> None:
+        import os
+        # A CSV path that does not exist yet → _poll_active early-returns, so no
+        # QWebEngineView is created (keeps this headless-safe).
+        missing_csv = os.path.join(self._tmp.name, "not_yet.csv")
+        params = self.window._current_scan_parameters()
+        self.window._on_scan_prepared(params, missing_csv)
+        self.assertTrue(self.window.follow_check.isChecked())  # live view auto-enabled
+        self.assertTrue(self.window.viewer._follow)
+        self.assertIsNone(self.window.viewer._page)  # no web view instantiated
+
     def test_hardware_settings_defaults_match_usb_vcp_defaults(self) -> None:
         self.window.backend_combo.setCurrentText("CAEN USB-VCP")
 

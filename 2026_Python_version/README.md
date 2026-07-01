@@ -51,11 +51,14 @@ A single window with four tabs:
   wait/point, and the UV-lamp flag are editable. Start/Abort, with a run log; each run is written to
   a CSV under `measurements/`. The scan **never switches HV on by itself** — power on the channels you
   want first (Channels tab); it runs using only the channels that are ON. If some are OFF a
-  confirmation appears (those channels are left untouched); if none are ON, Start is blocked.
+  confirmation appears (those channels are left untouched); if none are ON, Start is blocked. When a
+  scan finishes (or is aborted), the scanned channels **ramp back down to 1 V** — left ON after a
+  normal finish, powered off after an abort.
 - **Viewer** — a Plotly current viewer (in `μA`) whose **x-axis follows the swept variable** (THGEM
   voltage, drift field, or induction field). **Load CSV…** plots a saved run; load several of the
   *same* program to **overlay** them (auto-legended by their held quantities), toggle channels
-  (C/T1/B1/T2), and **Clear**. Tick **Follow active scan** to track the running scan's CSV live.
+  (C/T1/B1/T2), and **Clear**. **Follow active scan** turns on automatically when a scan starts, so the
+  Viewer builds the plot **live** as points are taken (untick to stop, or watch a past run instead).
   Plotting is decoupled from acquisition (the scan just writes CSV), mirroring
   [CAEN-Plotly-Viewer-From-Log](https://github.com/weizmann-atlas/CAEN-Plotly-Viewer-From-Log).
 
