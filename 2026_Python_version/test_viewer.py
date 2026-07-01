@@ -13,6 +13,20 @@ from plotly_view import PlotlyViewer, build_figure, figure_html, series_from_csv
 from scan_controller import ScanCallbacks, ScanController, ScanParameters, ScanVariable
 
 
+class _FakePage:
+    """Duck-typed stand-in for _PlotPage: only hide()/show() are exercised by
+    PlotlyViewer._on_page_load_finished, tracked here without touching Qt."""
+
+    def __init__(self) -> None:
+        self.hidden = False
+
+    def hide(self) -> None:
+        self.hidden = True
+
+    def show(self) -> None:
+        self.hidden = False
+
+
 def _run_to_csv(td: str, params: ScanParameters) -> Path:
     backend = SimulationInterface(seed=7)
     backend.connect()
@@ -84,6 +98,28 @@ class PlotlyViewerLazyTests(unittest.TestCase):
         # The QWebEngineView must NOT exist at construction — it crashes on a
         # headless/GPU-less runner; it is created lazily on the first render.
         self.assertIsNone(viewer._page)
+        viewer.deleteLater()
+
+    def test_load_failure_surfaces_error_instead_of_blank(self) -> None:
+        # A duck-typed stand-in for the page: _on_page_load_finished only calls
+        # hide()/show() on it, so this avoids constructing a real QWebEngineView
+        # (which crashes headless/GPU-less) while still exercising the real logic.
+        viewer = PlotlyViewer()
+        viewer._page = _FakePage()
+        viewer._on_page_load_finished(False)
+        self.assertIn("Plot failed to load", viewer._placeholder.text())
+        self.assertFalse(viewer._placeholder.isHidden())  # error text shown
+        self.assertTrue(viewer._page.hidden)  # blank page hidden behind it
+        viewer.deleteLater()
+
+    def test_load_success_restores_page_visibility(self) -> None:
+        viewer = PlotlyViewer()
+        viewer._page = _FakePage()
+        viewer._page.hidden = True
+        viewer._placeholder.setText("Plot failed to load in the embedded browser.")
+        viewer._on_page_load_finished(True)
+        self.assertTrue(viewer._placeholder.isHidden())
+        self.assertFalse(viewer._page.hidden)
         viewer.deleteLater()
 
 

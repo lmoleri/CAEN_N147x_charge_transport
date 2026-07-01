@@ -26,6 +26,7 @@ import math
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Callable
 
 from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtWebEngineWidgets import QWebEngineView
@@ -95,7 +96,22 @@ class _PlotServer:
 
 
 class _PlotPage(QWebEngineView):
-    """Loads the figure HTML served by the loopback server."""
+    """Loads the figure HTML served by the loopback server.
+
+    Tracks the real ``loadFinished`` outcome so a failed load (loopback blocked by
+    antivirus/firewall, the WebEngine render process not starting, etc.) can be
+    surfaced instead of silently leaving a blank view — this is exactly what made
+    the frozen build's failure indistinguishable from "loaded but didn't paint".
+    """
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.on_result: Callable[[bool], None] | None = None
+        self.loadFinished.connect(self._on_load_finished)
+
+    def _on_load_finished(self, ok: bool) -> None:
+        if self.on_result is not None:
+            self.on_result(ok)
 
     def display(self, html_bytes: bytes) -> None:
         server = _PlotServer.instance()
@@ -252,9 +268,27 @@ class PlotlyViewer(QtWidgets.QWidget):
     def _ensure_page(self) -> None:
         if self._page is None:
             page = _PlotPage()  # may raise if plotly/QtWebEngine cannot initialise
+            page.on_result = self._on_page_load_finished
             self._layout.addWidget(page)
             self._page = page
             self._placeholder.hide()  # only hide once the page really exists
+
+    def _on_page_load_finished(self, ok: bool) -> None:
+        if ok:
+            # Loaded fine — restore visibility in case a previous load had failed.
+            self._placeholder.hide()
+            self._page.show()
+            return
+        # The page never loaded: distinguish this from "loaded but didn't paint"
+        # (a GPU/driver rendering issue), which previously looked identical (blank).
+        self._page.hide()
+        self._placeholder.setText(
+            "Plot failed to load in the embedded browser.\n"
+            "This can happen if antivirus/firewall blocks the local loopback connection, "
+            "or if hardware-accelerated rendering fails on this machine — try setting the "
+            "environment variable QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu before launching."
+        )
+        self._placeholder.show()
 
     def load_files(self, paths) -> None:
         for path in paths:

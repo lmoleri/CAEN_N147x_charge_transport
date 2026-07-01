@@ -43,12 +43,21 @@ def _selftest(app) -> int:
         print("SELFTEST FAIL (Viewer page was not created)")
         return 1
 
+    # Wait for the real page-load outcome instead of assuming it succeeded — a
+    # failed load (blocked loopback, WebEngine render process not starting, etc.)
+    # must be distinguished from "loaded but Chromium didn't paint".
+    load_result: dict[str, object] = {}
+    page.loadFinished.connect(lambda ok: load_result.setdefault("ok", ok))
     deadline = time.time() + 40
-    while time.time() < deadline and not page._ready:
+    while time.time() < deadline and "ok" not in load_result:
         app.processEvents()
         time.sleep(0.02)
 
-    settle = time.time() + 3  # let the buffered addTraces JS run
+    if load_result.get("ok") is not True:
+        print(f"SELFTEST FAIL (page failed to load: loadFinished={load_result.get('ok')!r})")
+        return 1
+
+    settle = time.time() + 1  # let the page finish painting
     while time.time() < settle:
         app.processEvents()
         time.sleep(0.02)
@@ -65,7 +74,7 @@ def _selftest(app) -> int:
 
     lens = result.get("r")
     ok = isinstance(lens, list) and len(lens) == len(CHANNEL_LABELS) and all(v == 3 for v in lens)
-    print(f"SELFTEST {'OK' if ok else 'FAIL'} (page_ready={page._ready}, trace_lengths={lens})")
+    print(f"SELFTEST {'OK' if ok else 'FAIL'} (trace_lengths={lens})")
     return 0 if ok else 1
 
 
