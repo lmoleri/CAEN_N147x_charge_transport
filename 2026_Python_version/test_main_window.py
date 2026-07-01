@@ -357,6 +357,28 @@ class MainWindowTabbedShellTests(unittest.TestCase):
 
         worker.backend.disconnect()
 
+    def test_scan_syncs_setpoints_to_parked_1v(self) -> None:
+        from main_window import ScanWorker
+        from scan_controller import ScanParameters, ScanVariable
+
+        worker = ScanWorker(Path(self._tmp.name))
+        worker.connect_backend("Simulation", None)
+        worker.backend.power_on_channels(CHANNEL_LABELS)
+        seen: list = []
+        worker.control_refresh.connect(lambda controls: seen.append(controls))
+
+        params = ScanParameters(
+            label="THGEM", scan_variable=ScanVariable.THGEM_VOLTAGE,
+            start=200, stop=250, step=50, wait_seconds=0.0,
+        )
+        worker.start_scan(params)  # runs synchronously when called directly
+
+        # After the scan the setpoints are pushed at the parked 1 V, so the editable
+        # VSet boxes (and _last_vset) match hardware and manual control isn't stuck.
+        self.assertTrue(seen)
+        self.assertTrue(all(abs(control.vset_v - 1.0) < 1e-9 for control in seen[-1]))
+        worker.backend.disconnect()
+
 
 if __name__ == "__main__":
     unittest.main()

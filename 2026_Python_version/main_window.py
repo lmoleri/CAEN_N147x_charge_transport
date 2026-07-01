@@ -165,12 +165,17 @@ class ScanWorker(QtCore.QObject):
         try:
             result = self.controller.run_scan(self.backend, params, logger, callbacks, self.abort_event)
             final_snapshots = self.backend.read_all_channels()
+            # The scan parked channels at 1 V; push the setpoints so the editable
+            # VSet boxes match the hardware (otherwise re-entering the pre-scan value
+            # is swallowed as "unchanged" and manual control appears stuck).
+            self.control_refresh.emit(self.backend.read_channel_controls())
             self.scan_finished.emit(result.success, result.aborted, result.message, final_snapshots)
         except Exception as exc:  # pragma: no cover - hardware-dependent
             final_snapshots = []
             try:
                 if self.backend is not None:
                     final_snapshots = self.backend.read_all_channels()
+                    self.control_refresh.emit(self.backend.read_channel_controls())
             except Exception:
                 final_snapshots = []
             self.scan_finished.emit(False, False, str(exc), final_snapshots)
