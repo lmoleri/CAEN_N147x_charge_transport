@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Callable
 
 from PyQt5 import QtCore, QtWidgets
-from PyQt5.QtWebEngineWidgets import QWebEngineView
+from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineView
 
 from caen_interface import CHANNEL_LABELS
 from scan_controller import variable_spec_for
@@ -41,12 +41,30 @@ CHANNEL_COLORS = {
     "T2": "#5cb85c",
 }
 
+# QtWebEngine 5.15 ships an OLD Chromium (~87). Recent plotly.js bundles call
+# newer JS methods (e.g. Array/String.prototype.at, Chromium 92) during load — on
+# old Chromium that throws, the plotly IIFE never assigns window.Plotly, and the
+# plot stays blank. Polyfill the missing methods BEFORE plotly.js so it runs.
+_COMPAT_POLYFILL = (
+    "<script>(function(){"
+    "function _at(n){n=Math.trunc(n)||0;if(n<0)n+=this.length;"
+    "return (n<0||n>=this.length)?undefined:this[n];}"
+    "if(!Array.prototype.at){Object.defineProperty(Array.prototype,'at',"
+    "{value:_at,writable:true,configurable:true});}"
+    "if(!String.prototype.at){Object.defineProperty(String.prototype,'at',"
+    "{value:_at,writable:true,configurable:true});}"
+    "if(!Object.hasOwn){Object.hasOwn=function(o,k){"
+    "return Object.prototype.hasOwnProperty.call(o,k);};}"
+    "})();</script>"
+)
+
 # plotly.js is a UMD bundle: if a module loader (AMD `define`, CommonJS `module`)
 # is present it registers there instead of the global `window.Plotly`, leaving
 # `Plotly` undefined and the figure blank. Neutralise loaders so the global branch
-# runs. Injected into <head> ahead of the inlined plotly.js.
+# runs. Both are injected into <head> ahead of the inlined plotly.js.
 _LOADER_PREAMBLE = (
-    "<script>window.define=undefined;window.exports=undefined;window.module=undefined;</script>"
+    _COMPAT_POLYFILL
+    + "<script>window.define=undefined;window.exports=undefined;window.module=undefined;</script>"
 )
 
 
@@ -95,6 +113,18 @@ class _PlotServer:
         return cls._instance
 
 
+class _LoggingWebPage(QWebEnginePage):
+    """A page that records JS console messages — including uncaught errors — so a
+    plot that loads but doesn't render can be diagnosed instead of failing silently."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.console_messages: list[str] = []
+
+    def javaScriptConsoleMessage(self, level, message, line_number, source_id):  # noqa: N802
+        self.console_messages.append(f"[{int(level)}] {message} (line {line_number})")
+
+
 class _PlotPage(QWebEngineView):
     """Loads the figure HTML served by the loopback server.
 
@@ -102,12 +132,18 @@ class _PlotPage(QWebEngineView):
     antivirus/firewall, the WebEngine render process not starting, etc.) can be
     surfaced instead of silently leaving a blank view — this is exactly what made
     the frozen build's failure indistinguishable from "loaded but didn't paint".
+    Also captures JS console messages for diagnostics (see ``--selftest``).
     """
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
+        self._log_page = _LoggingWebPage(self)
+        self.setPage(self._log_page)
         self.on_result: Callable[[bool], None] | None = None
         self.loadFinished.connect(self._on_load_finished)
+
+    def console_messages(self) -> list[str]:
+        return list(self._log_page.console_messages)
 
     def _on_load_finished(self, ok: bool) -> None:
         if self.on_result is not None:

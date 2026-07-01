@@ -166,6 +166,16 @@ class FigureHtmlTests(unittest.TestCase):
         self.assertIn('id="graph"', html)  # --selftest reads document.getElementById('graph').data
         self.assertIn("314", html)  # x data embedded in the document
 
+    def test_figure_html_polyfills_old_chromium_before_plotly(self) -> None:
+        # QtWebEngine 5.15 = Chromium 87, which lacks Array.prototype.at (Chromium 92)
+        # that plotly.js calls at load. The polyfill must appear BEFORE plotly runs, or
+        # the bundle throws and window.Plotly is never defined (blank plot).
+        html = figure_html([self._series([1.0, 2.0])], set(CHANNEL_LABELS))
+        poly = html.find("Array.prototype.at")
+        newplot = html.find("Plotly.newPlot")
+        self.assertGreaterEqual(poly, 0)
+        self.assertLess(poly, newplot)
+
     def test_figure_html_empty_is_valid(self) -> None:
         self.assertIn("Plotly.newPlot", figure_html([], set(CHANNEL_LABELS)))
 

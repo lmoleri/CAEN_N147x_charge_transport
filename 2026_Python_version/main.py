@@ -73,24 +73,37 @@ def _selftest(app) -> int:
         app.processEvents()
         time.sleep(0.02)
 
+    # Ask the page for the ground truth: is Plotly defined, and did it attach data
+    # to the graph div? (Reported together so a failure tells us exactly why.)
     result: dict[str, object] = {}
     loop = QtCore.QEventLoop()
     page.page().runJavaScript(
-        "(document.getElementById('graph')||{}).data ? "
-        "document.getElementById('graph').data.map(t=>t.x.length) : null",
+        "JSON.stringify({plotly: typeof Plotly, "
+        "data: (document.getElementById('graph')||{}).data ? "
+        "document.getElementById('graph').data.map(function(t){return t.x.length;}) : null})",
         lambda r: (result.__setitem__("r", r), loop.quit()),
     )
     QtCore.QTimer.singleShot(8000, loop.quit)
     loop.exec_()
 
-    lens = result.get("r")
+    import json
+
+    try:
+        info = json.loads(result.get("r") or "{}")
+    except (TypeError, ValueError):
+        info = {}
+    lens = info.get("data")
+    plotly_type = info.get("plotly")
+    console = page.console_messages()
+    console_tail = " || ".join(console[-6:]) if console else "(no console messages)"
+
     ok = isinstance(lens, list) and len(lens) == len(CHANNEL_LABELS) and all(v == 3 for v in lens)
     if ok:
         return _report(f"SELFTEST OK — Plotly rendered {len(lens)} traces of 3 points each.", 0)
     return _report(
-        f"SELFTEST FAIL: the page loaded but Plotly did not render the expected traces "
-        f"(trace_lengths={lens}). This points to the Chromium GPU/paint path — the app now "
-        "defaults to software rendering (QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu).",
+        "SELFTEST FAIL: the page loaded but the plot did not render.\n"
+        f"typeof Plotly = {plotly_type!r}; trace_lengths = {lens}.\n"
+        f"JS console: {console_tail}",
         1,
     )
 
