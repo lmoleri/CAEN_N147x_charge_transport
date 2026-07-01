@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -15,10 +16,17 @@ def _selftest(app) -> int:
     import time
     from pathlib import Path
 
-    from PyQt5 import QtCore
+    from PyQt5 import QtCore, QtWidgets
 
     from caen_interface import CHANNEL_LABELS
     from plotly_view import PlotlyViewer
+
+    def _report(message: str, code: int) -> int:
+        # The exe is windowed (console=False), so stdout is invisible when launched
+        # from a terminal — show the verdict in a dialog too.
+        print(message)
+        QtWidgets.QMessageBox.information(None, "THGEM Viewer self-test", message)
+        return code
 
     # A minimal 3-point THGEM-scan CSV (only the columns series_from_csv reads).
     header = ["mode", "scan_variable", "v_thgem1_v"] + [f"{c.lower()}_imon_ua" for c in CHANNEL_LABELS]
@@ -40,8 +48,7 @@ def _selftest(app) -> int:
 
     page = view._page
     if page is None:
-        print("SELFTEST FAIL (Viewer page was not created)")
-        return 1
+        return _report("SELFTEST FAIL (Viewer page was not created)", 1)
 
     # Wait for the real page-load outcome instead of assuming it succeeded — a
     # failed load (blocked loopback, WebEngine render process not starting, etc.)
@@ -54,8 +61,12 @@ def _selftest(app) -> int:
         time.sleep(0.02)
 
     if load_result.get("ok") is not True:
-        print(f"SELFTEST FAIL (page failed to load: loadFinished={load_result.get('ok')!r})")
-        return 1
+        return _report(
+            "SELFTEST FAIL: the plot page failed to load in the embedded browser "
+            f"(loadFinished={load_result.get('ok')!r}). Likely a blocked local loopback "
+            "connection (antivirus/firewall) or the WebEngine render process not starting.",
+            1,
+        )
 
     settle = time.time() + 1  # let the page finish painting
     while time.time() < settle:
@@ -74,8 +85,14 @@ def _selftest(app) -> int:
 
     lens = result.get("r")
     ok = isinstance(lens, list) and len(lens) == len(CHANNEL_LABELS) and all(v == 3 for v in lens)
-    print(f"SELFTEST {'OK' if ok else 'FAIL'} (trace_lengths={lens})")
-    return 0 if ok else 1
+    if ok:
+        return _report(f"SELFTEST OK — Plotly rendered {len(lens)} traces of 3 points each.", 0)
+    return _report(
+        f"SELFTEST FAIL: the page loaded but Plotly did not render the expected traces "
+        f"(trace_lengths={lens}). This points to the Chromium GPU/paint path — the app now "
+        "defaults to software rendering (QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu).",
+        1,
+    )
 
 
 def main() -> int:
@@ -88,6 +105,12 @@ def main() -> int:
         return 1
 
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_ShareOpenGLContexts)
+
+    # Force QtWebEngine to render in software. On many Windows desktops/laptops the
+    # Chromium GPU path silently fails to paint (blank web view, no error) — software
+    # rendering is reliable and plenty fast for a plotting viewer. setdefault so it can
+    # be overridden; must be set before QtWebEngine initialises (i.e. before this point).
+    os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
 
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName("THGEM Exercise 3.B School GUI")
