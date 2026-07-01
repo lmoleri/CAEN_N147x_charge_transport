@@ -52,8 +52,8 @@ A single window with four tabs:
   a CSV under `measurements/`. The scan **never switches HV on by itself** — power on the channels you
   want first (Channels tab); it runs using only the channels that are ON. If some are OFF a
   confirmation appears (those channels are left untouched); if none are ON, Start is blocked. When a
-  scan finishes (or is aborted), the scanned channels **ramp back down to 1 V** — left ON after a
-  normal finish, powered off after an abort.
+  scan finishes (or is aborted), the scanned channels **ramp back down to 1 V and stay ON** (they are
+  never switched off automatically).
 - **Viewer** — a Plotly current viewer (in `μA`) whose **x-axis follows the swept variable** (THGEM
   voltage, drift field, or induction field). **Load CSV…** plots a saved run; load several of the
   *same* program to **overlay** them (auto-legended by their held quantities), toggle channels

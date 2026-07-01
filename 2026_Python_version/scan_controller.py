@@ -308,10 +308,11 @@ class ScanController:
         return not abort_event.is_set()
 
     def _handle_abort(self, interface: BaseCaenInterface, callbacks: ScanCallbacks, active: list[str]) -> None:
+        # Abort brings channels back to 1 V but leaves them ON (like a normal finish).
         self._park_channels(
-            interface, callbacks, active, power_off=True,
+            interface, callbacks, active, power_off=False,
             lead_message="Abort requested. Returning scanned channels to 1 V.",
-            done_message="Abort sequence complete. Channels are OFF.",
+            done_message="Abort complete. Channels parked at 1 V.",
         )
 
     def _park_channels(

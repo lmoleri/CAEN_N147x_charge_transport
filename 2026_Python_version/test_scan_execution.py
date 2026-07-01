@@ -82,7 +82,7 @@ class ScanExecutionTests(unittest.TestCase):
         self.assertTrue(all(r.e_drift_kv_cm == 0.5 for r in records))  # drift held
         self.assertTrue(all(r.scan_variable == "induction_field" for r in records))
 
-    def test_abort_stops_scan_and_powers_channels_off(self) -> None:
+    def test_abort_stops_scan_and_parks_channels_at_1v_left_on(self) -> None:
         backend = SimulationInterface(seed=11)
         backend.connect()
         backend.set_ramp_rates(300.0, 300.0)
@@ -108,8 +108,9 @@ class ScanExecutionTests(unittest.TestCase):
         self.assertTrue(results)
         self.assertTrue(results[0].aborted)
 
+        # Abort ramps to 1 V but leaves channels ON (like a normal finish).
         snapshots = backend.read_all_channels()
-        self.assertTrue(all(not snapshot.is_on for snapshot in snapshots))
+        self.assertTrue(all(snapshot.is_on for snapshot in snapshots))
         self.assertTrue(all(abs(backend._channel_state[label]["voltage_v"] - 1.0) < 1e-9 for label in CHANNEL_LABELS))
 
         with csv_path.open("r", newline="", encoding="utf-8") as handle:

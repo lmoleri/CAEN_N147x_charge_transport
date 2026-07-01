@@ -9,7 +9,7 @@ from PyQt5 import QtWidgets
 
 from caen_interface import CHANNEL_LABELS, SimulationInterface
 from data_logger import DataLogger
-from plotly_view import PlotlyViewer, series_from_csv
+from plotly_view import PlotlyViewer, build_figure, figure_html, series_from_csv
 from scan_controller import ScanCallbacks, ScanController, ScanParameters, ScanVariable
 
 
@@ -96,6 +96,42 @@ class PlotlyDataTests(unittest.TestCase):
         plotly_js = offline.get_plotlyjs()
         self.assertIsInstance(plotly_js, str)
         self.assertGreater(len(plotly_js), 100_000)
+
+
+class FigureHtmlTests(unittest.TestCase):
+    def _series(self, xs, axis_title="THGEM1 voltage [V]", label="THGEM"):
+        return {
+            "x": list(xs),
+            "channels": {lbl: [11.0 + idx] * len(xs) for idx, lbl in enumerate(CHANNEL_LABELS)},
+            "label": label,
+            "axis_title": axis_title,
+            "path": "/tmp/scan.csv",
+        }
+
+    def test_build_figure_one_trace_per_visible_channel(self) -> None:
+        fig = build_figure([self._series([200.0, 250.0])], set(CHANNEL_LABELS))
+        self.assertEqual(len(fig.data), len(CHANNEL_LABELS))
+        self.assertEqual({trace.name for trace in fig.data}, set(CHANNEL_LABELS))
+        self.assertEqual(fig.layout.xaxis.title.text, "THGEM1 voltage [V]")
+
+    def test_build_figure_hidden_channels_dropped(self) -> None:
+        fig = build_figure([self._series([200.0])], {"C", "B1"})
+        self.assertEqual({trace.name for trace in fig.data}, {"C", "B1"})
+
+    def test_build_figure_x_axis_follows_axis_title(self) -> None:
+        fig = build_figure([self._series([0.0, 0.5], axis_title="Drift field [kV/cm]")], set(CHANNEL_LABELS))
+        self.assertEqual(fig.layout.xaxis.title.text, "Drift field [kV/cm]")
+
+    def test_figure_html_embeds_plot_and_data_on_load(self) -> None:
+        # The whole figure is in the served HTML, so it renders on page load with no
+        # runJavaScript (which was why the frozen Viewer was blank).
+        html = figure_html([self._series([200.0, 250.0, 314.0])], set(CHANNEL_LABELS))
+        self.assertIn("Plotly.newPlot", html)
+        self.assertIn('id="graph"', html)  # --selftest reads document.getElementById('graph').data
+        self.assertIn("314", html)  # x data embedded in the document
+
+    def test_figure_html_empty_is_valid(self) -> None:
+        self.assertIn("Plotly.newPlot", figure_html([], set(CHANNEL_LABELS)))
 
 
 if __name__ == "__main__":

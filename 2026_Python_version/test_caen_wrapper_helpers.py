@@ -14,7 +14,7 @@ from caen_interface import (
     decode_status,
     status_color_hex,
 )
-from plotly_view import _PAGE_HTML
+from plotly_view import build_figure
 
 
 class CaenWrapperHelperTests(unittest.TestCase):
@@ -136,7 +136,7 @@ class CaenWrapperHelperTests(unittest.TestCase):
         self.assertEqual(record.channel_snapshots()["B1"].imon_ua, 0.3)
 
     def test_plotly_axis_uses_microamp_units(self) -> None:
-        self.assertIn("Current [μA]", _PAGE_HTML)
+        self.assertEqual(build_figure([], set()).layout.yaxis.title.text, "Current [μA]")
 
 
 if __name__ == "__main__":

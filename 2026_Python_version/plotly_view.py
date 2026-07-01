@@ -1,24 +1,27 @@
-"""File-based current-vs-THGEM1-voltage viewer rendered with Plotly in a Qt
-WebEngine view.
+"""Current-vs-swept-variable viewer: builds a complete Plotly figure as HTML and
+loads it in a Qt WebEngine view.
 
 The viewer loads scan **CSV files** and plots them (overlaying several, with
 per-channel toggles), and can *follow* an active scan's CSV for a near-live view.
 Plotting is decoupled from the scan: the Scan tab just writes CSV.
 
-The ``QWebEngineView`` is created **lazily** on first render — constructing the
-widget (e.g. in tests, or on a headless CI runner) never instantiates QtWebEngine,
-which crashes on a display-less / GPU-less machine.
+Rendering mirrors weizmann-atlas/CAEN-Plotly-Viewer-From-Log: the whole figure is
+built with ``plotly`` and embedded in a self-contained HTML document
+(``fig.to_html(full_html=True, include_plotlyjs=True)``); that document is served
+over a 127.0.0.1 loopback HTTP server and the web view simply ``load()``s it. The
+plot therefore renders **on page load** — we do not inject traces with
+``runJavaScript`` (which silently draws nothing if the injection ever misfires, and
+was why the frozen build showed a blank page). ``file://`` / ``setHtml`` are avoided
+because QtWebEngine can't load local content reliably once frozen by PyInstaller.
 
-The Plotly page (and the bundled plotly.js) is served over a 127.0.0.1 loopback
-HTTP server rather than ``file://`` / ``setHtml``: QtWebEngine cannot load local
-content reliably once the app is frozen by PyInstaller. This mirrors
-weizmann-atlas/CAEN-Plotly-Viewer-From-Log.
+The ``QWebEngineView`` is created **lazily** on first render — constructing the
+widget (in tests or on a headless/GPU-less runner) never instantiates QtWebEngine,
+which crashes on a display-less machine.
 """
 
 from __future__ import annotations
 
 import csv as _csv
-import json
 import math
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -37,59 +40,35 @@ CHANNEL_COLORS = {
     "T2": "#5cb85c",
 }
 
-_PAGE_HTML = """<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<script src="/plotly.min.js"></script>
-<style>
- html,body{margin:0;height:100%;font-family:-apple-system,Segoe UI,sans-serif;background:#fff}
- #sub{padding:4px 10px;color:#555;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
- #graph{width:100%;height:calc(100% - 26px)}
-</style></head>
-<body>
-<div id="sub">&nbsp;</div><div id="graph"></div>
-<script>
-const LAYOUT = {
-   margin: {l: 64, r: 16, t: 10, b: 48},
-   xaxis: {title: 'THGEM1 voltage [V]', zeroline: false},
-   yaxis: {title: 'Current [μA]', zeroline: false},
-   showlegend: true, legend: {x: 1, y: 1, xanchor: 'right', yanchor: 'top'}
-};
-Plotly.newPlot('graph', [], LAYOUT, {responsive: true, displaylogo: false});
-function clearAll() { Plotly.react('graph', [], LAYOUT); }
-function addFullSeries(name, color, xs, ys) {
-   Plotly.addTraces('graph', [{x: xs, y: ys, mode: 'lines+markers', name: name,
-      line: {color: color, width: 2}, marker: {color: color, size: 5}}]);
-}
-function setSubtitle(t) { document.getElementById('sub').textContent = t; }
-function setXAxisTitle(t) { Plotly.relayout('graph', {'xaxis.title': t}); }
-window.__plotReady = true;
-</script>
-</body></html>"""
+# plotly.js is a UMD bundle: if a module loader (AMD `define`, CommonJS `module`)
+# is present it registers there instead of the global `window.Plotly`, leaving
+# `Plotly` undefined and the figure blank. Neutralise loaders so the global branch
+# runs. Injected into <head> ahead of the inlined plotly.js.
+_LOADER_PREAMBLE = (
+    "<script>window.define=undefined;window.exports=undefined;window.module=undefined;</script>"
+)
 
 
 class _PlotServer:
-    """Singleton loopback server that serves plotly.js and the plot page."""
+    """Singleton loopback server that serves the current figure HTML."""
 
     _instance: "_PlotServer | None" = None
 
     def __init__(self) -> None:
-        import plotly.offline  # lazy: keep the 4.8 MB import off module load
-
-        plotly_js = plotly.offline.get_plotlyjs().encode("utf-8")
-        page = _PAGE_HTML.encode("utf-8")
+        self._html_lock = threading.Lock()
+        self._html_bytes = b"<!DOCTYPE html><html><head><meta charset='utf-8'></head><body></body></html>"
+        server = self
 
         class _Handler(BaseHTTPRequestHandler):
             def log_message(self, *_args) -> None:  # silence default stderr logging
                 pass
 
             def do_GET(self) -> None:  # noqa: N802 - http.server API
-                if self.path.startswith("/plotly.min.js"):
-                    body, ctype = plotly_js, "application/javascript"
-                else:
-                    body, ctype = page, "text/html; charset=utf-8"
+                with server._html_lock:
+                    body = server._html_bytes
                 try:
                     self.send_response(200)
-                    self.send_header("Content-Type", ctype)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
@@ -99,10 +78,14 @@ class _PlotServer:
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
 
+    def set_html(self, html_bytes: bytes) -> None:
+        with self._html_lock:
+            self._html_bytes = html_bytes
+
     @property
     def url(self) -> str:
         host, port = self._server.server_address
-        return f"http://{host}:{port}/plot"
+        return f"http://{host}:{port}/plot.html"
 
     @classmethod
     def instance(cls) -> "_PlotServer":
@@ -112,28 +95,12 @@ class _PlotServer:
 
 
 class _PlotPage(QWebEngineView):
-    """Holds the Plotly page; buffers JS calls until the page has loaded."""
+    """Loads the figure HTML served by the loopback server."""
 
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._ready = False
-        self._pending: list[str] = []
-        self.loadFinished.connect(self._on_loaded)
-        self.load(QtCore.QUrl(_PlotServer.instance().url))
-
-    def _on_loaded(self, ok: bool) -> None:
-        if not ok:
-            return
-        self._ready = True
-        for js in self._pending:
-            self.page().runJavaScript(js)
-        self._pending.clear()
-
-    def run_js(self, js: str) -> None:
-        if self._ready:
-            self.page().runJavaScript(js)
-        else:
-            self._pending.append(js)
+    def display(self, html_bytes: bytes) -> None:
+        server = _PlotServer.instance()
+        server.set_html(html_bytes)
+        self.load(QtCore.QUrl(server.url))
 
 
 def _finite_or_none(value) -> float | None:
@@ -207,16 +174,64 @@ def series_from_csv(path) -> dict:
     }
 
 
+def build_figure(series_list, visible):
+    """Build the Plotly figure: one ``lines+markers`` trace per visible channel per
+    series. Pure (only plotly, no Qt) so trace counts/names/data are unit-testable."""
+    import plotly.graph_objects as go  # lazy: keep the ~0.5 s import off module load
+
+    fig = go.Figure()
+    multi = len(series_list) > 1
+    for series in series_list:
+        for label in CHANNEL_LABELS:
+            if label not in visible:
+                continue
+            ys = [_finite_or_none(v) for v in series["channels"].get(label, [])]
+            name = f"{label} · {series['label']}" if multi else label
+            color = CHANNEL_COLORS.get(label, "#888888")
+            fig.add_scatter(
+                x=list(series["x"]), y=ys, mode="lines+markers", name=name,
+                line={"color": color, "width": 2}, marker={"color": color, "size": 5},
+            )
+
+    axis_title = series_list[-1].get("axis_title", "THGEM1 voltage [V]") if series_list else "THGEM1 voltage [V]"
+    subtitle = " | ".join(s["label"] for s in series_list)
+    fig.update_layout(
+        margin={"l": 64, "r": 16, "t": 34 if subtitle else 10, "b": 48},
+        xaxis_title=axis_title,
+        yaxis_title="Current [μA]",
+        title=({"text": subtitle, "x": 0.0, "xanchor": "left", "font": {"size": 12}} if subtitle else None),
+        showlegend=True,
+        legend={"x": 1, "y": 1, "xanchor": "right", "yanchor": "top"},
+        template="plotly_white",
+    )
+    return fig
+
+
+def figure_html(series_list, visible) -> str:
+    """A self-contained Plotly HTML document (figure + inlined plotly.js). The plot
+    is fully described by the returned HTML, so it renders on load (no runJavaScript).
+    Unit-testable headless."""
+    html = build_figure(series_list, visible).to_html(
+        full_html=True,
+        include_plotlyjs=True,
+        div_id="graph",
+        default_width="100%",
+        default_height="100%",
+        config={"responsive": True, "displaylogo": False},
+    )
+    return html.replace("<head>", "<head>" + _LOADER_PREAMBLE, 1)
+
+
 class PlotlyViewer(QtWidgets.QWidget):
-    """Plots one or more scan CSVs (current vs V_THGEM1). The QtWebEngine view is
-    created lazily on the first render."""
+    """Plots one or more scan CSVs (current vs the swept variable). The QtWebEngine
+    view is created lazily on the first render."""
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._layout = QtWidgets.QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._placeholder = QtWidgets.QLabel(
-            'Load a scan CSV (or tick "Follow active scan") to plot current vs V_THGEM1.'
+            'Load a scan CSV (or tick "Follow active scan") to plot current vs the swept variable.'
         )
         self._placeholder.setAlignment(QtCore.Qt.AlignCenter)
         self._placeholder.setStyleSheet("color: grey; font-style: italic;")
@@ -226,6 +241,7 @@ class PlotlyViewer(QtWidgets.QWidget):
         self._files: list[dict] = []
         self._live: dict | None = None
         self._visible: set[str] = set(CHANNEL_LABELS)
+        self._last_sig: tuple | None = None
 
         self._follow = False
         self._active_path = None
@@ -251,9 +267,7 @@ class PlotlyViewer(QtWidgets.QWidget):
     def clear(self) -> None:
         self._files = []
         self._live = None
-        if self._page is not None:
-            self._page.run_js("clearAll();")
-            self._page.run_js('setSubtitle("");')
+        self._render()  # empty figure if a page exists, else keeps the placeholder
 
     def set_channel_visible(self, label: str, visible: bool) -> None:
         if visible:
@@ -299,29 +313,25 @@ class PlotlyViewer(QtWidgets.QWidget):
         series_list = list(self._files)
         if self._live is not None:
             series_list.append(self._live)
-        if not series_list:
-            if self._page is not None:
-                self._page.run_js("clearAll();")
+        if not series_list and self._page is None:
+            return  # nothing to show yet — keep the placeholder
+
+        # Skip redundant rebuilds (e.g. a 1 s live poll with no new point).
+        signature = (
+            tuple(len(series["x"]) for series in series_list),
+            tuple(series["path"] for series in series_list),
+            tuple(sorted(self._visible)),
+        )
+        if signature == self._last_sig:
             return
+        self._last_sig = signature
+
         try:
             self._ensure_page()
-        except Exception as exc:  # e.g. plotly data missing in a broken bundle
+            html = figure_html(series_list, self._visible)
+        except Exception as exc:  # plotly/QtWebEngine init or figure build failed
             self._placeholder.setText(f"Plot unavailable: {exc}")
             self._placeholder.show()
+            self._last_sig = None
             return
-        self._page.run_js("clearAll();")
-        multi = len(series_list) > 1
-        for series in series_list:
-            for label in CHANNEL_LABELS:
-                if label not in self._visible:
-                    continue
-                ys = [_finite_or_none(v) for v in series["channels"].get(label, [])]
-                name = f"{label} · {series['label']}" if multi else label
-                color = CHANNEL_COLORS.get(label, "#888888")
-                self._page.run_js(
-                    f"addFullSeries({json.dumps(name)}, {json.dumps(color)}, "
-                    f"{json.dumps(series['x'])}, {json.dumps(ys)});"
-                )
-        axis_title = series_list[-1].get("axis_title", "THGEM1 voltage [V]")
-        self._page.run_js(f"setXAxisTitle({json.dumps(axis_title)});")
-        self._page.run_js(f"setSubtitle({json.dumps(' | '.join(s['label'] for s in series_list))});")
+        self._page.display(html.encode("utf-8"))
