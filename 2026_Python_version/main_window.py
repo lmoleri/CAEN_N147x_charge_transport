@@ -2,6 +2,7 @@
 # weizmann-atlas/caen_logger.
 from __future__ import annotations
 
+import re
 import threading
 from pathlib import Path
 
@@ -323,6 +324,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self._build_channels_tab(), "Channels")
         self.tabs.addTab(self._build_scan_tab(), "Scan")
         self.tabs.addTab(self._build_viewer_tab(), "Viewer")
+        # A permanent widget (not a transient showMessage) so the running indicator
+        # survives Save/Load-CSV/modal dialogs that would otherwise clear the status bar.
+        self.scan_status_label = QtWidgets.QLabel("")
+        self.scan_status_label.setStyleSheet("color: #d9534f; font-weight: bold;")
+        self.statusBar().addPermanentWidget(self.scan_status_label)
         self.statusBar().showMessage("Ready.")
 
     def _build_setup_tab(self) -> QtWidgets.QWidget:
@@ -699,6 +705,10 @@ class MainWindow(QtWidgets.QMainWindow):
             check.toggled.connect(lambda on, lbl=label: self._on_viewer_channel_toggled(lbl, on))
             self.viewer_channel_checks[label] = check
             toolbar.addWidget(check)
+        toolbar.addSpacing(16)
+        self.log_y_check = QtWidgets.QCheckBox("Log y")
+        self.log_y_check.toggled.connect(self._on_viewer_log_y_toggled)
+        toolbar.addWidget(self.log_y_check)
         toolbar.addStretch(1)
 
         # Each scan (and each Load CSV) gets its own tab; empty state shows a hint.
@@ -743,6 +753,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._viewer_stack.setCurrentIndex(1 if has_tabs else 0)
         self.save_plot_button.setEnabled(has_tabs)
         self.close_tab_button.setEnabled(has_tabs)
+        self.log_y_check.setEnabled(has_tabs)
         for check in self.viewer_channel_checks.values():
             check.setEnabled(has_tabs)
 
@@ -765,17 +776,42 @@ class MainWindow(QtWidgets.QMainWindow):
         if viewer is not None:
             viewer.set_channel_visible(label, on)
 
+    def _on_viewer_log_y_toggled(self, on: bool) -> None:
+        viewer = self._current_viewer()
+        if viewer is not None:
+            viewer.set_y_log(on)
+
+    def _mark_tab_running(self, viewer: "PlotlyViewer | None", running: bool) -> None:
+        """Toggle a leading ``●`` marker on a scan's tab while it is live."""
+        if viewer is None:
+            return
+        index = self.viewer_tabs.indexOf(viewer)
+        if index < 0:
+            return
+        marker = "● "
+        text = self.viewer_tabs.tabText(index)
+        if running and not text.startswith(marker):
+            self.viewer_tabs.setTabText(index, marker + text)
+        elif not running and text.startswith(marker):
+            self.viewer_tabs.setTabText(index, text[len(marker):])
+
     def _on_viewer_tab_changed(self, index: int) -> None:
-        # Reflect the newly-selected tab's channel visibility in the shared checkboxes.
+        # Reflect the newly-selected tab's channel visibility + log-y in the shared
+        # toolbar, and disable channel toggles for channels that were OFF (not plotted).
         viewer = self._current_viewer()
         if viewer is None:
             return
+        present = viewer.present_channels()
         for label, check in self.viewer_channel_checks.items():
             visible = label in viewer._visible
             if check.isChecked() != visible:
                 check.blockSignals(True)
                 check.setChecked(visible)
                 check.blockSignals(False)
+            check.setEnabled(label in present if present else True)
+        self.log_y_check.blockSignals(True)
+        self.log_y_check.setChecked(viewer._y_log)
+        self.log_y_check.blockSignals(False)
 
     def _load_viewer_csv(self) -> None:
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
@@ -786,13 +822,21 @@ class MainWindow(QtWidgets.QMainWindow):
             viewer = self._new_viewer_tab(Path(paths[0]).stem)
             viewer.load_files(paths)
 
+    def _default_plot_filename(self) -> str:
+        """A prefilled save path built from the current tab's scan program + time."""
+        index = self.viewer_tabs.currentIndex()
+        title = self.viewer_tabs.tabText(index) if index >= 0 else "plot"
+        title = title.lstrip("● ").strip()  # drop the running marker
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", title).strip("_") or "plot"
+        return str(self.base_dir / "measurements" / f"{safe}.png")
+
     def _save_current_plot(self) -> None:
         viewer = self._current_viewer()
         if viewer is None or not viewer.has_plot():
             QtWidgets.QMessageBox.information(self, "Save plot", "There is no plot to save yet.")
             return
         path, selected = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save plot", str(self.base_dir / "measurements"),
+            self, "Save plot", self._default_plot_filename(),
             "PNG image (*.png);;Interactive HTML (*.html)",
         )
         if not path:
@@ -1215,12 +1259,12 @@ class MainWindow(QtWidgets.QMainWindow):
         viewer.set_follow(True)
         viewer.set_active_csv(csv_path)
         self._active_scan_viewer = viewer
+        self._mark_tab_running(viewer, True)
         self.output_path_label.setText(f"CSV output: {csv_path}")
         self.scan_running = True
         self.poll_timer.stop()
-        self._set_scan_state(True)
+        self._set_scan_state(True)  # sets the permanent "Scan running…" status indicator
         self._append_log(f"Scan started ({params.describe()}). Writing CSV to {csv_path}")
-        self.statusBar().showMessage("Scan running...")
 
     def _on_point_recorded(self, record: object) -> None:
         self._on_channel_refresh(list(record.channel_snapshots().values()))
@@ -1236,6 +1280,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_scan_state(False)
         if self._active_scan_viewer is not None:
             self._active_scan_viewer.notify_scan_finished()
+            self._mark_tab_running(self._active_scan_viewer, False)
         if self.connected_backend:
             self.poll_timer.start()
         self._on_channel_refresh(final_snapshots)
@@ -1310,6 +1355,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_scan_inputs_enabled(not running)
         self._set_manual_controls_enabled(self.connected_backend and not running)
         self._on_transport_selection_changed()
+        self.scan_status_label.setText("● Scan running…" if running else "")
 
     def _set_manual_controls_enabled(self, enabled: bool) -> None:
         for cells in self.channel_cells.values():

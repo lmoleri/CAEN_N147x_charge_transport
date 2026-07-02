@@ -167,6 +167,71 @@ def _safe_float(value) -> float | None:
         return None
 
 
+def _safe_bool(value) -> bool:
+    return str(value).strip().lower() in ("true", "1", "yes", "on")
+
+
+def _vmon_mag(row, label):
+    """Measured |VMon| (magnitude) for a channel from a CSV row, or None."""
+    v = _safe_float(row.get(f"{label.lower()}_vmon_v"))
+    return abs(v) if v is not None else None
+
+
+def _vmon_err(row, label) -> float:
+    e = _safe_float(row.get(f"{label.lower()}_vmon_err_v"))
+    return abs(e) if e is not None else 0.0
+
+
+def _has_vmon(first_row, labels) -> bool:
+    return all(f"{lbl.lower()}_vmon_v" in first_row for lbl in labels)
+
+
+def _make_x_builder(scan_variable, spec, drift_gap, induction_gap, first_row):
+    """Return a per-row ``(x, xerr)`` function that plots the **measured** swept
+    quantity (from VMon) with an x error bar. Falls back to the nominal setpoint column
+    (``xerr=None``) when the VMon columns (or a gap) are missing — e.g. legacy CSVs."""
+    def nominal(row):
+        return _safe_float(row.get(spec.record_column)), None
+
+    if scan_variable == "drift_field":
+        if not (_has_vmon(first_row, ("C", "T1")) and drift_gap and drift_gap > 0):
+            return nominal
+        denom = 1000.0 * drift_gap  # E_drift = (V_C - V_T1) / (1000 * gap_cm), kV/cm
+
+        def drift(row):
+            v_c, v_t1 = _vmon_mag(row, "C"), _vmon_mag(row, "T1")
+            if v_c is None or v_t1 is None:
+                return None, None
+            return (v_c - v_t1) / denom, math.hypot(_vmon_err(row, "C"), _vmon_err(row, "T1")) / denom
+
+        return drift
+
+    if scan_variable == "induction_field":
+        if not (_has_vmon(first_row, ("T2", "B1")) and induction_gap and induction_gap > 0):
+            return nominal
+        denom = 1000.0 * induction_gap
+
+        def induction(row):
+            v_t2, v_b1 = _vmon_mag(row, "T2"), _vmon_mag(row, "B1")
+            if v_t2 is None or v_b1 is None:
+                return None, None
+            return (v_t2 - v_b1) / denom, math.hypot(_vmon_err(row, "T2"), _vmon_err(row, "B1")) / denom
+
+        return induction
+
+    # thgem_voltage (and legacy CSVs): ΔV = |V_B1| + |V_T1|
+    if not _has_vmon(first_row, ("B1", "T1")):
+        return nominal
+
+    def thgem(row):
+        v_b1, v_t1 = _vmon_mag(row, "B1"), _vmon_mag(row, "T1")
+        if v_b1 is None or v_t1 is None:
+            return None, None
+        return v_b1 + v_t1, math.hypot(_vmon_err(row, "B1"), _vmon_err(row, "T1"))
+
+    return thgem
+
+
 def _legend_for(path: Path, scan_variable: str, mode: str, v_thgem1, e_drift, e_induction) -> str:
     """Build a curve label from the *held* quantities (not the swept one), so an
     overlay of same-program scans is distinguished by what was held constant."""
@@ -198,13 +263,17 @@ def series_from_csv(path) -> dict:
     """
     path = Path(path)
     xs: list[float] = []
+    xerrs: list[float | None] = []
     channels: dict[str, list[float | None]] = {label: [] for label in CHANNEL_LABELS}
     errors: dict[str, list[float | None]] = {label: [] for label in CHANNEL_LABELS}
+    present: set[str] = set()
     scan_variable = "thgem_voltage"
     spec = variable_spec_for(scan_variable)
     mode = ""
     held_v = held_ed = held_ei = None
     captured = False
+    has_is_on = False
+    x_builder = None
     with path.open("r", newline="", encoding="utf-8") as handle:
         for row in _csv.DictReader(handle):
             if not captured:
@@ -214,47 +283,75 @@ def series_from_csv(path) -> dict:
                 held_v = _safe_float(row.get("v_thgem1_v"))
                 held_ed = _safe_float(row.get("e_drift_kv_cm"))
                 held_ei = _safe_float(row.get("e_transfer_kv_cm"))
+                has_is_on = any(f"{lbl.lower()}_is_on" in row for lbl in CHANNEL_LABELS)
+                x_builder = _make_x_builder(
+                    scan_variable, spec,
+                    _safe_float(row.get("drift_gap_cm")),
+                    _safe_float(row.get("induction_gap_cm")),
+                    row,
+                )
                 captured = True
-            x = _safe_float(row.get(spec.record_column))
+            x, xerr = x_builder(row)
             if x is None:
                 continue
             xs.append(x)
+            xerrs.append(xerr)
             for label in CHANNEL_LABELS:
                 channels[label].append(_safe_float(row.get(f"{label.lower()}_imon_ua")))
                 errors[label].append(_safe_float(row.get(f"{label.lower()}_imon_err_ua")))
+                if _safe_bool(row.get(f"{label.lower()}_is_on")):
+                    present.add(label)
+    if not has_is_on:  # legacy CSV without is_on columns → can't tell, show all
+        present = set(CHANNEL_LABELS)
     return {
         "x": xs,
+        "xerr": xerrs,
         "channels": channels,
         "errors": errors,
+        "present": present,
         "label": _legend_for(path, scan_variable, mode, held_v, held_ed, held_ei),
         "axis_title": spec.axis_title,
         "path": str(path),
     }
 
 
-def build_figure(series_list, visible):
-    """Build the Plotly figure: one ``lines+markers`` trace per visible channel per
-    series. Pure (only plotly, no Qt) so trace counts/names/data are unit-testable."""
+def build_figure(series_list, visible, y_log=False):
+    """Build the Plotly figure: one ``lines+markers`` trace per visible **and present**
+    channel per series (OFF channels are skipped). On a log y-axis currents are plotted
+    as |I| so the negative C/T1 traces still appear. Points carry x/y error bars when the
+    series provides them. Pure (only plotly, no Qt) so it is unit-testable."""
     import plotly.graph_objects as go  # lazy: keep the ~0.5 s import off module load
 
     fig = go.Figure()
     multi = len(series_list) > 1
     for series in series_list:
+        present = series.get("present")
+        xs = list(series["x"])
+        # x error bars from the measured swept-variable uncertainty (shared per series).
+        xerr_raw = series.get("xerr", []) or []
+        xerrs = [e if (isinstance(e, (int, float)) and math.isfinite(e) and e > 0) else 0.0 for e in xerr_raw]
+        x_error = ({"type": "data", "array": xerrs, "visible": True, "thickness": 1}
+                   if len(xerrs) == len(xs) and any(e > 0 for e in xerrs) else None)
         for label in CHANNEL_LABELS:
             if label not in visible:
                 continue
-            ys = [_finite_or_none(v) for v in series["channels"].get(label, [])]
+            if present is not None and label not in present:
+                continue  # channel was OFF for the whole scan — don't plot it
+            raw = [_finite_or_none(v) for v in series["channels"].get(label, [])]
+            ys = [(abs(v) if v is not None else None) for v in raw] if y_log else raw
             name = f"{label} · {series['label']}" if multi else label
             color = CHANNEL_COLORS.get(label, "#888888")
             scatter = {
-                "x": list(series["x"]), "y": ys, "mode": "lines+markers", "name": name,
-                "line": {"color": color, "width": 2}, "marker": {"color": color, "size": 5},
+                "x": xs, "y": ys, "mode": "lines+markers", "name": name,
+                "line": {"color": color, "width": 2}, "marker": {"color": color, "size": 9},
             }
             # Show the measured IMon uncertainty as vertical error bars when present.
             errs_raw = series.get("errors", {}).get(label, [])
             errs = [e if (isinstance(e, (int, float)) and math.isfinite(e) and e > 0) else 0.0 for e in errs_raw]
             if len(errs) == len(ys) and any(e > 0 for e in errs):
                 scatter["error_y"] = {"type": "data", "array": errs, "visible": True, "thickness": 1}
+            if x_error is not None:
+                scatter["error_x"] = x_error
             fig.add_scatter(**scatter)
 
     axis_title = series_list[-1].get("axis_title", "THGEM1 voltage [V]") if series_list else "THGEM1 voltage [V]"
@@ -262,7 +359,8 @@ def build_figure(series_list, visible):
     fig.update_layout(
         margin={"l": 64, "r": 16, "t": 34 if subtitle else 10, "b": 48},
         xaxis_title=axis_title,
-        yaxis_title="Current [μA]",
+        yaxis_title="|Current| [μA]" if y_log else "Current [μA]",
+        yaxis_type="log" if y_log else "linear",
         title=({"text": subtitle, "x": 0.0, "xanchor": "left", "font": {"size": 12}} if subtitle else None),
         showlegend=True,
         legend={"x": 1, "y": 1, "xanchor": "right", "yanchor": "top"},
@@ -271,11 +369,11 @@ def build_figure(series_list, visible):
     return fig
 
 
-def figure_html(series_list, visible) -> str:
+def figure_html(series_list, visible, y_log=False) -> str:
     """A self-contained Plotly HTML document (figure + inlined plotly.js). The plot
     is fully described by the returned HTML, so it renders on load (no runJavaScript).
     Unit-testable headless."""
-    html = build_figure(series_list, visible).to_html(
+    html = build_figure(series_list, visible, y_log).to_html(
         full_html=True,
         include_plotlyjs=True,
         div_id="graph",
@@ -305,6 +403,7 @@ class PlotlyViewer(QtWidgets.QWidget):
         self._files: list[dict] = []
         self._live: dict | None = None
         self._visible: set[str] = set(CHANNEL_LABELS)
+        self._y_log = False
         self._last_sig: tuple | None = None
 
         self._follow = False
@@ -358,6 +457,19 @@ class PlotlyViewer(QtWidgets.QWidget):
             self._visible.discard(label)
         self._render()
 
+    def set_y_log(self, on: bool) -> None:
+        self._y_log = bool(on)
+        self._render()
+
+    def present_channels(self) -> set:
+        """Channels that were ON in at least one loaded/live series (OFF channels are
+        not plotted). Empty when nothing is loaded yet."""
+        result: set = set()
+        for series in self._current_series():
+            present = series.get("present")
+            result |= set(CHANNEL_LABELS) if present is None else set(present)
+        return result
+
     def set_follow(self, on: bool) -> None:
         self._follow = bool(on)
         if self._follow and self._active_path:
@@ -403,7 +515,9 @@ class PlotlyViewer(QtWidgets.QWidget):
 
     def save_html(self, path) -> None:
         """Write the current plot as a self-contained interactive HTML document."""
-        Path(path).write_text(figure_html(self._current_series(), self._visible), encoding="utf-8")
+        Path(path).write_text(
+            figure_html(self._current_series(), self._visible, self._y_log), encoding="utf-8"
+        )
 
     def save_png(self, path, on_done: "Callable[[bool, str], None]") -> None:
         """Render the current plot to a PNG using the web view's own Plotly (client
@@ -461,6 +575,7 @@ class PlotlyViewer(QtWidgets.QWidget):
             tuple(len(series["x"]) for series in series_list),
             tuple(series["path"] for series in series_list),
             tuple(sorted(self._visible)),
+            self._y_log,
         )
         if signature == self._last_sig:
             return
@@ -468,7 +583,7 @@ class PlotlyViewer(QtWidgets.QWidget):
 
         try:
             self._ensure_page()
-            html = figure_html(series_list, self._visible)
+            html = figure_html(series_list, self._visible, self._y_log)
         except Exception as exc:  # plotly/QtWebEngine init or figure build failed
             self._placeholder.setText(f"Plot unavailable: {exc}")
             self._placeholder.show()

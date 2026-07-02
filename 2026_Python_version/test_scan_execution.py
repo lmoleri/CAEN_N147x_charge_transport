@@ -200,6 +200,21 @@ class ScanExecutionTests(unittest.TestCase):
         self.assertTrue(any(r.c_imon_err_ua > 0 for r in records))
         self.assertTrue(any(r.b1_imon_err_ua > 0 for r in records))
 
+    def test_records_carry_measured_vmon_error_and_gaps(self) -> None:
+        # VMon is aggregated over the same reads (mean±std) and the gaps are recorded,
+        # so the Viewer can plot the actual measured swept quantity with x error bars.
+        params = ScanParameters(
+            label="THGEM", scan_variable=ScanVariable.THGEM_VOLTAGE,
+            start=400, stop=500, step=50, wait_seconds=0.0,
+        )
+        _, records = self._run(params)
+        for record in records:
+            for attr in ("c_vmon_err_v", "t1_vmon_err_v", "b1_vmon_err_v", "t2_vmon_err_v"):
+                self.assertGreaterEqual(getattr(record, attr), 0.0)
+            self.assertEqual(record.drift_gap_cm, params.drift_gap_cm)
+            self.assertEqual(record.induction_gap_cm, params.induction_gap_cm)
+        self.assertTrue(any(r.b1_vmon_err_v > 0 for r in records))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -27,11 +27,11 @@ class _FakePage:
         self.hidden = False
 
 
-def _run_to_csv(td: str, params: ScanParameters) -> Path:
+def _run_to_csv(td: str, params: ScanParameters, on_labels=CHANNEL_LABELS) -> Path:
     backend = SimulationInterface(seed=7)
     backend.connect()
     backend.set_ramp_rates(300.0, 300.0)
-    backend.power_on_channels(CHANNEL_LABELS)  # the scan drives only ON channels
+    backend.power_on_channels(list(on_labels))  # the scan drives only ON channels
     logger = DataLogger(Path(td))
     csv_path = logger.open_run(params.label)
     ScanController().run_scan(backend, params, logger, ScanCallbacks(), threading.Event())
@@ -49,8 +49,12 @@ class SeriesFromCsvTests(unittest.TestCase):
             )
             series = series_from_csv(_run_to_csv(td, params))
 
-        # gain sweeps B1 (150→250); recorded/plotted x is ΔV = B1 + T1(50)
-        self.assertEqual(series["x"], [200.0, 250.0, 300.0])
+        # gain sweeps B1 (150→250); plotted x is the MEASURED ΔV = |V_B1| + |V_T1(50)|,
+        # so it tracks the nominal 200/250/300 within the VMon read noise, with x errors.
+        for got, want in zip(series["x"], [200.0, 250.0, 300.0]):
+            self.assertAlmostEqual(got, want, delta=1.0)
+        self.assertEqual(len(series["xerr"]), 3)
+        self.assertTrue(all(e is not None and e >= 0 for e in series["xerr"]))
         self.assertEqual(series["axis_title"], "THGEM1 voltage [V]")
         self.assertEqual(set(series["channels"]), set(CHANNEL_LABELS))
         self.assertEqual(len(series["channels"]["C"]), 3)
@@ -66,10 +70,24 @@ class SeriesFromCsvTests(unittest.TestCase):
             )
             series = series_from_csv(_run_to_csv(td, params))
 
-        self.assertEqual(series["x"], [0.0, 0.5, 1.0])
+        # x is the MEASURED drift field (|V_C|-|V_T1|)/(1000·gap), ≈ nominal 0/0.5/1.0.
+        for got, want in zip(series["x"], [0.0, 0.5, 1.0]):
+            self.assertAlmostEqual(got, want, delta=0.05)
+        self.assertEqual(len(series["xerr"]), 3)
         self.assertEqual(series["axis_title"], "Drift field [kV/cm]")
         self.assertIn("V=700", series["label"])  # held quantities, not the swept E_drift
         self.assertIn("Ei=1", series["label"])
+
+    def test_off_channels_are_marked_absent_and_not_plotted(self) -> None:
+        with TemporaryDirectory() as td:
+            params = ScanParameters(
+                label="THGEM", scan_variable=ScanVariable.THGEM_VOLTAGE,
+                start=400, stop=500, step=50, wait_seconds=0.0,
+            )
+            series = series_from_csv(_run_to_csv(td, params, on_labels=["B1", "T2"]))
+        self.assertEqual(series["present"], {"B1", "T2"})  # C, T1 were OFF the whole scan
+        fig = build_figure([series], set(CHANNEL_LABELS))  # visible=all, but present filters
+        self.assertEqual({trace.name for trace in fig.data}, {"B1", "T2"})
 
     def test_series_includes_measured_error_bars(self) -> None:
         with TemporaryDirectory() as td:
@@ -206,6 +224,37 @@ class FigureHtmlTests(unittest.TestCase):
         # _series has no "errors" key (as legacy/old CSVs and manual dicts) → no bars.
         trace = build_figure([self._series([200.0, 250.0])], {"C"}).data[0]
         self.assertIsNone(trace.error_y.array)
+
+    def test_build_figure_markers_are_enlarged(self) -> None:
+        trace = build_figure([self._series([200.0, 250.0])], {"C"}).data[0]
+        self.assertGreaterEqual(trace.marker.size, 8)
+
+    def test_build_figure_log_y_uses_log_axis_and_absolute_values(self) -> None:
+        series = self._series([200.0, 250.0])
+        series["channels"]["C"] = [-3.0, -4.0]  # C is recorded negative (polarity)
+        fig = build_figure([series], {"C"}, y_log=True)
+        self.assertEqual(fig.layout.yaxis.type, "log")
+        self.assertEqual(tuple(fig.data[0].y), (3.0, 4.0))  # |I| so it shows on a log axis
+
+    def test_build_figure_linear_keeps_signed_values(self) -> None:
+        series = self._series([200.0, 250.0])
+        series["channels"]["C"] = [-3.0, -4.0]
+        fig = build_figure([series], {"C"}, y_log=False)
+        self.assertEqual(fig.layout.yaxis.type, "linear")
+        self.assertEqual(tuple(fig.data[0].y), (-3.0, -4.0))
+
+    def test_build_figure_adds_x_error_bars_when_present(self) -> None:
+        series = self._series([200.0, 250.0])
+        series["xerr"] = [0.5, 0.7]
+        trace = build_figure([series], {"C"}).data[0]
+        self.assertTrue(trace.error_x.visible)
+        self.assertEqual(tuple(trace.error_x.array), (0.5, 0.7))
+
+    def test_build_figure_present_set_filters_channels(self) -> None:
+        series = self._series([200.0])
+        series["present"] = {"B1"}
+        fig = build_figure([series], set(CHANNEL_LABELS))
+        self.assertEqual({trace.name for trace in fig.data}, {"B1"})
 
     def test_figure_html_embeds_plot_and_data_on_load(self) -> None:
         # The whole figure is in the served HTML, so it renders on page load with no

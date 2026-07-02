@@ -398,12 +398,19 @@ class RunPointRecord:
     t2_is_on: bool
     t2_status_code: int
     t2_status_text: str
-    # Measured IMon uncertainty (std over the reads averaged into *_imon_ua). Trailing
-    # with defaults so older callers/CSVs (no repeated reads) keep working — 0 = no bar.
+    # Measured IMon/VMon uncertainty (std over the reads averaged into *_imon_ua /
+    # *_vmon_v) plus the electrode gaps. Trailing with defaults so older callers/CSVs
+    # (no repeated reads / no gaps) keep working — 0 = no error bar.
     c_imon_err_ua: float = 0.0
     t1_imon_err_ua: float = 0.0
     b1_imon_err_ua: float = 0.0
     t2_imon_err_ua: float = 0.0
+    c_vmon_err_v: float = 0.0
+    t1_vmon_err_v: float = 0.0
+    b1_vmon_err_v: float = 0.0
+    t2_vmon_err_v: float = 0.0
+    drift_gap_cm: float = 0.0
+    induction_gap_cm: float = 0.0
 
     @classmethod
     def from_snapshots(
@@ -421,19 +428,28 @@ class RunPointRecord:
         snapshots: Sequence[ChannelSnapshot],
         imon_by_label: "dict[str, float] | None" = None,
         imon_err_by_label: "dict[str, float] | None" = None,
+        vmon_by_label: "dict[str, float] | None" = None,
+        vmon_err_by_label: "dict[str, float] | None" = None,
+        drift_gap_cm: float = 0.0,
+        induction_gap_cm: float = 0.0,
     ) -> "RunPointRecord":
-        """Build a record from a channel read. ``imon_by_label`` overrides the IMon
-        with a mean (over several reads) and ``imon_err_by_label`` supplies its std;
-        when omitted the single snapshot's IMon is used and the error is 0."""
+        """Build a record from a channel read. ``imon_by_label`` / ``vmon_by_label``
+        override IMon / VMon with a mean (over several reads) and ``*_err_by_label``
+        supply their std; when omitted the single snapshot value is used and error 0.
+        ``drift_gap_cm`` / ``induction_gap_cm`` are recorded so the Viewer can convert
+        measured electrode voltages into the actual swept field."""
         by_label = {snapshot.label: snapshot for snapshot in snapshots}
         imon_by_label = imon_by_label or {}
         imon_err_by_label = imon_err_by_label or {}
+        vmon_by_label = vmon_by_label or {}
+        vmon_err_by_label = vmon_err_by_label or {}
 
         def values(label: str) -> tuple[float, float, bool, int, str]:
             snapshot = by_label[label]
             imon = imon_by_label.get(label, snapshot.imon_ua)
+            vmon = vmon_by_label.get(label, snapshot.vmon_v)
             return (
-                snapshot.vmon_v,
+                vmon,
                 imon,
                 snapshot.is_on,
                 snapshot.status_code,
@@ -442,6 +458,9 @@ class RunPointRecord:
 
         def err(label: str) -> float:
             return float(imon_err_by_label.get(label, 0.0))
+
+        def verr(label: str) -> float:
+            return float(vmon_err_by_label.get(label, 0.0))
 
         return cls(
             mode=mode,
@@ -477,6 +496,12 @@ class RunPointRecord:
             t1_imon_err_ua=err("T1"),
             b1_imon_err_ua=err("B1"),
             t2_imon_err_ua=err("T2"),
+            c_vmon_err_v=verr("C"),
+            t1_vmon_err_v=verr("T1"),
+            b1_vmon_err_v=verr("B1"),
+            t2_vmon_err_v=verr("T2"),
+            drift_gap_cm=drift_gap_cm,
+            induction_gap_cm=induction_gap_cm,
         )
 
     @classmethod

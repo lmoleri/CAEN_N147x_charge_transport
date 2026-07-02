@@ -33,13 +33,14 @@ DEFAULT_WAIT_SECONDS = 7.0
 READS_PER_POINT = 5
 
 
-def _aggregate_imon(reads: list) -> "tuple[dict[str, float], dict[str, float]]":
-    """Per-channel mean and sample standard deviation of IMon across several reads of
-    the same scan point. The mean is the plotted value; the std is its error bar."""
+def _aggregate(reads: list, attr: str) -> "tuple[dict[str, float], dict[str, float]]":
+    """Per-channel mean and sample standard deviation of a snapshot attribute
+    (``imon_ua`` or ``vmon_v``) across several reads of the same scan point. The mean is
+    the recorded value; the std is its error bar."""
     by_label: dict[str, list[float]] = {}
     for snapshots in reads:
         for snapshot in snapshots:
-            by_label.setdefault(snapshot.label, []).append(snapshot.imon_ua)
+            by_label.setdefault(snapshot.label, []).append(getattr(snapshot, attr))
     means: dict[str, float] = {}
     errs: dict[str, float] = {}
     for label, samples in by_label.items():
@@ -292,7 +293,8 @@ class ScanController:
             # spread (std) becomes the error bar. The last read supplies VMon/status.
             reads = [interface.read_all_channels() for _ in range(READS_PER_POINT)]
             snapshots = reads[-1]
-            imon_mean, imon_err = _aggregate_imon(reads)
+            imon_mean, imon_err = _aggregate(reads, "imon_ua")
+            vmon_mean, vmon_err = _aggregate(reads, "vmon_v")
             if callbacks.on_channel_refresh is not None:
                 callbacks.on_channel_refresh(snapshots)
 
@@ -310,6 +312,10 @@ class ScanController:
                 snapshots=snapshots,
                 imon_by_label=imon_mean,
                 imon_err_by_label=imon_err,
+                vmon_by_label=vmon_mean,
+                vmon_err_by_label=vmon_err,
+                drift_gap_cm=params.drift_gap_cm,
+                induction_gap_cm=params.induction_gap_cm,
             )
             data_logger.write_record(record)
             if callbacks.on_point_recorded is not None:

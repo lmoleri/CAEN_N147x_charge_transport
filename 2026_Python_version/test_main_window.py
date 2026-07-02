@@ -274,6 +274,34 @@ class MainWindowTabbedShellTests(unittest.TestCase):
         self.assertEqual(self.window.viewer_tabs.count(), 0)
         self.assertFalse(self.window.save_plot_button.isEnabled())
 
+    def test_viewer_log_y_toggle_applies_to_current_tab(self) -> None:
+        import os
+        params = self.window._current_scan_parameters()
+        self.window._on_scan_prepared(params, os.path.join(self._tmp.name, "a.csv"))
+        viewer = self.window._active_scan_viewer
+        self.assertFalse(viewer._y_log)
+        self.window.log_y_check.setChecked(True)
+        self.assertTrue(viewer._y_log)  # toggle applied to the current tab's viewer
+
+    def test_default_plot_filename_from_scan_and_time(self) -> None:
+        import os
+        params = self.window._current_scan_parameters()
+        self.window._on_scan_prepared(params, os.path.join(self._tmp.name, "a.csv"))
+        name = os.path.basename(self.window._default_plot_filename())
+        self.assertTrue(name.endswith(".png"))
+        for bad in ("●", " ", "·", ":"):
+            self.assertNotIn(bad, name)  # running marker + separators sanitized
+
+    def test_running_scan_marks_tab_and_status(self) -> None:
+        import os
+        params = self.window._current_scan_parameters()
+        self.window._on_scan_prepared(params, os.path.join(self._tmp.name, "a.csv"))
+        self.assertTrue(self.window.viewer_tabs.tabText(0).startswith("● "))
+        self.assertIn("running", self.window.scan_status_label.text().lower())
+        self.window._on_scan_finished(True, False, "done", [])  # finishing clears both
+        self.assertFalse(self.window.viewer_tabs.tabText(0).startswith("● "))
+        self.assertEqual(self.window.scan_status_label.text(), "")
+
     def test_hardware_settings_defaults_match_usb_vcp_defaults(self) -> None:
         self.window.backend_combo.setCurrentText("CAEN USB-VCP")
 

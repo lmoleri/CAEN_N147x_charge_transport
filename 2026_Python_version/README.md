@@ -54,15 +54,18 @@ A single window with four tabs:
   confirmation appears (those channels are left untouched); if none are ON, Start is blocked. When a
   scan finishes (or is aborted), the scanned channels **ramp back down to 1 V and stay ON** (they are
   never switched off automatically).
-- **Viewer** — a Plotly current viewer (in `μA`) whose **x-axis follows the swept variable** (THGEM
-  voltage, drift field, or induction field). **Every scan opens its own tab** and follows it **live**
-  as points are taken; tabs stay open so you can compare runs. Each point carries an **error bar** —
-  the standard deviation of the repeated current readings taken at that point (the measurement noise).
-  **Load CSV…** opens a new tab for a saved run (select several files of the *same* program to
-  **overlay** them, auto-legended by their held quantities). The channel toggles (C/T1/B1/T2) and
-  **Save plot…** act on the current tab, and **Close tab** removes it. **Save plot…** exports the
-  current plot as a **PNG image** or a self-contained **interactive HTML** file. Plotting is decoupled
-  from acquisition (the scan just writes CSV), mirroring
+- **Viewer** — a Plotly current viewer (in `μA`) whose **x-axis is the measured swept quantity** derived
+  from the electrodes' VMon (ΔV for the gain scan; the actual drift / induction field for the field scans),
+  shown with **x and y error bars** — the spread (standard deviation) of the repeated reads taken at each
+  point. **Every scan opens its own tab**, marked with a `●` while it is still running, and follows it
+  **live** as points are taken; tabs stay open so you can compare runs. Channels that were **OFF are not
+  plotted**. A **Log y** toggle switches the current tab's y-axis to logarithmic (plotting `|current|`,
+  so the negative C/T1 traces still show). **Load CSV…** opens a new tab for a saved run (select several
+  files of the *same* program to **overlay** them, auto-legended by their held quantities). The channel
+  toggles (C/T1/B1/T2), **Log y**, and **Save plot…** act on the current tab; **Close tab** removes it.
+  **Save plot…** exports the current plot as a **PNG image** or a self-contained **interactive HTML**
+  file, with a filename pre-filled from the scan program + time. Plotting is decoupled from acquisition
+  (the scan just writes CSV), mirroring
   [CAEN-Plotly-Viewer-From-Log](https://github.com/weizmann-atlas/CAEN-Plotly-Viewer-From-Log).
 
 ## System requirements
