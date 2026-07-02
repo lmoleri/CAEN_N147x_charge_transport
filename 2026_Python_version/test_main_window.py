@@ -50,9 +50,10 @@ class MainWindowTabbedShellTests(unittest.TestCase):
         self.assertEqual(titles, ["Setup", "Channels", "Scan", "Viewer"])
 
     def test_viewer_has_no_webengine_until_used(self) -> None:
-        # The viewer's QWebEngineView is created lazily; constructing MainWindow
-        # must not instantiate it (it crashes on a headless CI runner).
-        self.assertIsNone(self.window.viewer._page)
+        # No scan/CSV yet → no Viewer tab exists, so no QWebEngineView is created
+        # (it crashes on a headless CI runner; each tab makes one lazily on render).
+        self.assertEqual(self.window.viewer_tabs.count(), 0)
+        self.assertFalse(self.window.save_plot_button.isEnabled())  # nothing to save
 
     def test_channel_grid_lists_every_channel(self) -> None:
         self.assertEqual(set(self.window.channel_cells), set(CHANNEL_LABELS))
@@ -246,16 +247,32 @@ class MainWindowTabbedShellTests(unittest.TestCase):
             self.window._queue_start_scan()
         self.assertEqual(emitted, [1])  # confirmed → scan launched
 
-    def test_scan_start_enables_live_follow(self) -> None:
+    def test_scan_start_opens_a_following_viewer_tab(self) -> None:
         import os
         # A CSV path that does not exist yet → _poll_active early-returns, so no
         # QWebEngineView is created (keeps this headless-safe).
         missing_csv = os.path.join(self._tmp.name, "not_yet.csv")
         params = self.window._current_scan_parameters()
         self.window._on_scan_prepared(params, missing_csv)
-        self.assertTrue(self.window.follow_check.isChecked())  # live view auto-enabled
-        self.assertTrue(self.window.viewer._follow)
-        self.assertIsNone(self.window.viewer._page)  # no web view instantiated
+        viewer = self.window._active_scan_viewer
+        self.assertIsNotNone(viewer)                        # the scan got its own tab
+        self.assertEqual(self.window.viewer_tabs.count(), 1)
+        self.assertTrue(viewer._follow)                     # live view auto-enabled
+        self.assertIsNone(viewer._page)                     # no web view instantiated
+        self.assertTrue(self.window.save_plot_button.isEnabled())
+
+    def test_each_scan_opens_its_own_viewer_tab(self) -> None:
+        import os
+        params = self.window._current_scan_parameters()
+        self.window._on_scan_prepared(params, os.path.join(self._tmp.name, "a.csv"))
+        self.window._on_scan_prepared(params, os.path.join(self._tmp.name, "b.csv"))
+        self.assertEqual(self.window.viewer_tabs.count(), 2)  # one tab per scan
+        # Closing a tab drops its viewer and returns to the placeholder when empty.
+        self.window._close_viewer_tab(0)
+        self.assertEqual(self.window.viewer_tabs.count(), 1)
+        self.window._close_viewer_tab(0)
+        self.assertEqual(self.window.viewer_tabs.count(), 0)
+        self.assertFalse(self.window.save_plot_button.isEnabled())
 
     def test_hardware_settings_defaults_match_usb_vcp_defaults(self) -> None:
         self.window.backend_combo.setCurrentText("CAEN USB-VCP")

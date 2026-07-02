@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import statistics
 import threading
 import time
 from dataclasses import dataclass
@@ -26,6 +27,25 @@ DRIFT_GAP_CM = 0.5
 INDUCTION_GAP_CM = 0.1  # gap between THGEM1 bottom (B1) and the top electrode (T2)
 MIN_HV_V = 1.0
 DEFAULT_WAIT_SECONDS = 7.0
+
+# Each scan point reads the currents this many times; the recorded IMon is the mean
+# and the error bar is the standard deviation across the reads (the measurement noise).
+READS_PER_POINT = 5
+
+
+def _aggregate_imon(reads: list) -> "tuple[dict[str, float], dict[str, float]]":
+    """Per-channel mean and sample standard deviation of IMon across several reads of
+    the same scan point. The mean is the plotted value; the std is its error bar."""
+    by_label: dict[str, list[float]] = {}
+    for snapshots in reads:
+        for snapshot in snapshots:
+            by_label.setdefault(snapshot.label, []).append(snapshot.imon_ua)
+    means: dict[str, float] = {}
+    errs: dict[str, float] = {}
+    for label, samples in by_label.items():
+        means[label] = statistics.fmean(samples)
+        errs[label] = statistics.stdev(samples) if len(samples) > 1 else 0.0
+    return means, errs
 
 
 class ScanVariable(Enum):
@@ -268,7 +288,11 @@ class ScanController:
                 self._handle_abort(interface, callbacks, active)
                 return RunResult(False, True, "Scan aborted safely.")
 
-            snapshots = interface.read_all_channels()
+            # Read the point several times: the mean is the recorded IMon and the
+            # spread (std) becomes the error bar. The last read supplies VMon/status.
+            reads = [interface.read_all_channels() for _ in range(READS_PER_POINT)]
+            snapshots = reads[-1]
+            imon_mean, imon_err = _aggregate_imon(reads)
             if callbacks.on_channel_refresh is not None:
                 callbacks.on_channel_refresh(snapshots)
 
@@ -284,6 +308,8 @@ class ScanController:
                 e_transfer_kv_cm=e_induction,
                 timestamp_iso=timestamp_iso,
                 snapshots=snapshots,
+                imon_by_label=imon_mean,
+                imon_err_by_label=imon_err,
             )
             data_logger.write_record(record)
             if callbacks.on_point_recorded is not None:

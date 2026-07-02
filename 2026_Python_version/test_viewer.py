@@ -71,6 +71,17 @@ class SeriesFromCsvTests(unittest.TestCase):
         self.assertIn("V=700", series["label"])  # held quantities, not the swept E_drift
         self.assertIn("Ei=1", series["label"])
 
+    def test_series_includes_measured_error_bars(self) -> None:
+        with TemporaryDirectory() as td:
+            params = ScanParameters(
+                label="THGEM", scan_variable=ScanVariable.THGEM_VOLTAGE,
+                start=400, stop=500, step=50, wait_seconds=0.0,
+            )
+            series = series_from_csv(_run_to_csv(td, params))
+        self.assertEqual(set(series["errors"]), set(CHANNEL_LABELS))
+        self.assertEqual(len(series["errors"]["C"]), len(series["x"]))
+        self.assertTrue(any((e or 0) > 0 for e in series["errors"]["B1"]))  # measured spread
+
     def test_legacy_csv_without_scan_variable_defaults_to_voltage(self) -> None:
         with TemporaryDirectory() as td:
             path = Path(td) / "legacy.csv"
@@ -122,6 +133,32 @@ class PlotlyViewerLazyTests(unittest.TestCase):
         self.assertFalse(viewer._page.hidden)
         viewer.deleteLater()
 
+    def test_save_html_writes_selfcontained_document(self) -> None:
+        # Seed series directly (no load_files → no QWebEngineView); save_html is pure.
+        viewer = PlotlyViewer()
+        viewer._files = [{
+            "x": [200.0, 250.0],
+            "channels": {label: [1.0, 2.0] for label in CHANNEL_LABELS},
+            "errors": {label: [0.1, 0.1] for label in CHANNEL_LABELS},
+            "label": "THGEM", "axis_title": "THGEM1 voltage [V]", "path": "/tmp/x.csv",
+        }]
+        self.assertTrue(viewer.has_plot())
+        with TemporaryDirectory() as td:
+            out = Path(td) / "plot.html"
+            viewer.save_html(out)
+            text = out.read_text(encoding="utf-8")
+        self.assertIn("Plotly.newPlot", text)
+        self.assertIn('id="graph"', text)
+        viewer.deleteLater()
+
+    def test_save_png_without_a_rendered_page_reports_failure(self) -> None:
+        viewer = PlotlyViewer()
+        result: dict = {}
+        viewer.save_png("/tmp/should-not-be-written.png",
+                        lambda ok, msg: result.update(ok=ok, msg=msg))
+        self.assertFalse(result["ok"])  # no page yet → immediate, headless-safe failure
+        viewer.deleteLater()
+
 
 class PlotlyDataTests(unittest.TestCase):
     def test_plotly_js_data_is_available(self) -> None:
@@ -157,6 +194,18 @@ class FigureHtmlTests(unittest.TestCase):
     def test_build_figure_x_axis_follows_axis_title(self) -> None:
         fig = build_figure([self._series([0.0, 0.5], axis_title="Drift field [kV/cm]")], set(CHANNEL_LABELS))
         self.assertEqual(fig.layout.xaxis.title.text, "Drift field [kV/cm]")
+
+    def test_build_figure_adds_error_bars_when_present(self) -> None:
+        series = self._series([200.0, 250.0])
+        series["errors"] = {label: [0.1, 0.2] for label in CHANNEL_LABELS}
+        trace = build_figure([series], {"C"}).data[0]
+        self.assertTrue(trace.error_y.visible)
+        self.assertEqual(tuple(trace.error_y.array), (0.1, 0.2))
+
+    def test_build_figure_omits_error_bars_without_errors(self) -> None:
+        # _series has no "errors" key (as legacy/old CSVs and manual dicts) → no bars.
+        trace = build_figure([self._series([200.0, 250.0])], {"C"}).data[0]
+        self.assertIsNone(trace.error_y.array)
 
     def test_figure_html_embeds_plot_and_data_on_load(self) -> None:
         # The whole figure is in the served HTML, so it renders on page load with no

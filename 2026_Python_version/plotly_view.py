@@ -21,6 +21,7 @@ which crashes on a display-less machine.
 
 from __future__ import annotations
 
+import base64
 import csv as _csv
 import math
 import threading
@@ -191,11 +192,14 @@ def series_from_csv(path) -> dict:
     induction field); CSVs written before that column existed default to V_THGEM1.
     Pure (no Qt) so it is unit-testable headless.
 
-    Returns ``{"x", "channels", "label", "axis_title", "path"}``.
+    Returns ``{"x", "channels", "errors", "label", "axis_title", "path"}``. ``errors``
+    holds the per-point IMon uncertainty from the ``*_imon_err_ua`` columns (all-None
+    for CSVs written before error bars existed).
     """
     path = Path(path)
     xs: list[float] = []
     channels: dict[str, list[float | None]] = {label: [] for label in CHANNEL_LABELS}
+    errors: dict[str, list[float | None]] = {label: [] for label in CHANNEL_LABELS}
     scan_variable = "thgem_voltage"
     spec = variable_spec_for(scan_variable)
     mode = ""
@@ -217,9 +221,11 @@ def series_from_csv(path) -> dict:
             xs.append(x)
             for label in CHANNEL_LABELS:
                 channels[label].append(_safe_float(row.get(f"{label.lower()}_imon_ua")))
+                errors[label].append(_safe_float(row.get(f"{label.lower()}_imon_err_ua")))
     return {
         "x": xs,
         "channels": channels,
+        "errors": errors,
         "label": _legend_for(path, scan_variable, mode, held_v, held_ed, held_ei),
         "axis_title": spec.axis_title,
         "path": str(path),
@@ -240,10 +246,16 @@ def build_figure(series_list, visible):
             ys = [_finite_or_none(v) for v in series["channels"].get(label, [])]
             name = f"{label} · {series['label']}" if multi else label
             color = CHANNEL_COLORS.get(label, "#888888")
-            fig.add_scatter(
-                x=list(series["x"]), y=ys, mode="lines+markers", name=name,
-                line={"color": color, "width": 2}, marker={"color": color, "size": 5},
-            )
+            scatter = {
+                "x": list(series["x"]), "y": ys, "mode": "lines+markers", "name": name,
+                "line": {"color": color, "width": 2}, "marker": {"color": color, "size": 5},
+            }
+            # Show the measured IMon uncertainty as vertical error bars when present.
+            errs_raw = series.get("errors", {}).get(label, [])
+            errs = [e if (isinstance(e, (int, float)) and math.isfinite(e) and e > 0) else 0.0 for e in errs_raw]
+            if len(errs) == len(ys) and any(e > 0 for e in errs):
+                scatter["error_y"] = {"type": "data", "array": errs, "visible": True, "thickness": 1}
+            fig.add_scatter(**scatter)
 
     axis_title = series_list[-1].get("axis_title", "THGEM1 voltage [V]") if series_list else "THGEM1 voltage [V]"
     subtitle = " | ".join(s["label"] for s in series_list)
@@ -379,10 +391,68 @@ class PlotlyViewer(QtWidgets.QWidget):
             return
         self._render()
 
-    def _render(self) -> None:
+    def _current_series(self) -> list:
         series_list = list(self._files)
         if self._live is not None:
             series_list.append(self._live)
+        return series_list
+
+    def has_plot(self) -> bool:
+        """True once something has been plotted (used to enable the Save button)."""
+        return bool(self._current_series())
+
+    def save_html(self, path) -> None:
+        """Write the current plot as a self-contained interactive HTML document."""
+        Path(path).write_text(figure_html(self._current_series(), self._visible), encoding="utf-8")
+
+    def save_png(self, path, on_done: "Callable[[bool, str], None]") -> None:
+        """Render the current plot to a PNG using the web view's own Plotly (client
+        side — no kaleido). Asynchronous: ``on_done(ok, message)`` fires when finished."""
+        if self._page is None:
+            on_done(False, "There is no rendered plot to save yet.")
+            return
+        page = self._page.page()
+        page.runJavaScript(
+            "window.__png=null;"
+            "try{Plotly.toImage(document.getElementById('graph'),"
+            "{format:'png',width:1200,height:800})"
+            ".then(function(u){window.__png=u;})"
+            ".catch(function(e){window.__png='ERR:'+e;});}"
+            "catch(e){window.__png='ERR:'+e;}"
+        )
+        attempts = {"n": 0}
+        timer = QtCore.QTimer(self)
+
+        def finish(ok: bool, message: str) -> None:
+            timer.stop()
+            on_done(ok, message)
+
+        def poll() -> None:
+            attempts["n"] += 1
+            if attempts["n"] > 100:  # ~10 s
+                finish(False, "Timed out rendering the PNG in the embedded browser.")
+                return
+
+            def got(url) -> None:
+                if url is None:
+                    return  # promise not resolved yet — keep polling
+                if isinstance(url, str) and url.startswith("data:image/png;base64,"):
+                    try:
+                        Path(path).write_bytes(base64.b64decode(url.split(",", 1)[1]))
+                    except Exception as exc:  # pragma: no cover - disk/permission error
+                        finish(False, f"Could not write the PNG: {exc}")
+                        return
+                    finish(True, str(path))
+                else:
+                    finish(False, f"PNG rendering failed: {url}")
+
+            page.runJavaScript("window.__png", got)
+
+        timer.timeout.connect(poll)
+        timer.start(100)
+
+    def _render(self) -> None:
+        series_list = self._current_series()
         if not series_list and self._page is None:
             return  # nothing to show yet — keep the placeholder
 

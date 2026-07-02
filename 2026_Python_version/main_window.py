@@ -680,33 +680,102 @@ class MainWindow(QtWidgets.QMainWindow):
         tab = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(tab)
 
-        self.viewer = PlotlyViewer()
-
         toolbar = QtWidgets.QHBoxLayout()
         load_button = QtWidgets.QPushButton("Load CSV…")
         load_button.clicked.connect(self._load_viewer_csv)
-        clear_button = QtWidgets.QPushButton("Clear")
-        clear_button.clicked.connect(self.viewer.clear)
+        self.save_plot_button = QtWidgets.QPushButton("Save plot…")
+        self.save_plot_button.clicked.connect(self._save_current_plot)
+        self.close_tab_button = QtWidgets.QPushButton("Close tab")
+        self.close_tab_button.clicked.connect(self._close_current_viewer_tab)
         toolbar.addWidget(load_button)
-        toolbar.addWidget(clear_button)
+        toolbar.addWidget(self.save_plot_button)
+        toolbar.addWidget(self.close_tab_button)
         toolbar.addSpacing(16)
         toolbar.addWidget(QtWidgets.QLabel("Channels:"))
         self.viewer_channel_checks: dict[str, QtWidgets.QCheckBox] = {}
         for label in CHANNEL_LABELS:
             check = QtWidgets.QCheckBox(label)
             check.setChecked(True)
-            check.toggled.connect(lambda on, lbl=label: self.viewer.set_channel_visible(lbl, on))
+            check.toggled.connect(lambda on, lbl=label: self._on_viewer_channel_toggled(lbl, on))
             self.viewer_channel_checks[label] = check
             toolbar.addWidget(check)
-        toolbar.addSpacing(16)
-        self.follow_check = QtWidgets.QCheckBox("Follow active scan")
-        self.follow_check.toggled.connect(self.viewer.set_follow)
-        toolbar.addWidget(self.follow_check)
         toolbar.addStretch(1)
 
+        # Each scan (and each Load CSV) gets its own tab; empty state shows a hint.
+        self.viewer_tabs = QtWidgets.QTabWidget()
+        self.viewer_tabs.setTabsClosable(True)
+        self.viewer_tabs.setDocumentMode(True)
+        self.viewer_tabs.tabCloseRequested.connect(self._close_viewer_tab)
+        self.viewer_tabs.currentChanged.connect(self._on_viewer_tab_changed)
+        self._active_scan_viewer: PlotlyViewer | None = None
+
+        self._viewer_placeholder = QtWidgets.QLabel(
+            "Run a scan or Load CSV… to plot current vs the swept variable.\n"
+            "Each scan opens its own tab."
+        )
+        self._viewer_placeholder.setAlignment(QtCore.Qt.AlignCenter)
+        self._viewer_placeholder.setStyleSheet("color: grey; font-style: italic;")
+
+        self._viewer_stack = QtWidgets.QStackedWidget()
+        self._viewer_stack.addWidget(self._viewer_placeholder)  # index 0: no tabs
+        self._viewer_stack.addWidget(self.viewer_tabs)          # index 1: has tabs
+
         layout.addLayout(toolbar)
-        layout.addWidget(self.viewer, stretch=1)
+        layout.addWidget(self._viewer_stack, stretch=1)
+        self._update_viewer_stack()
         return tab
+
+    def _new_viewer_tab(self, title: str) -> PlotlyViewer:
+        viewer = PlotlyViewer()
+        for label, check in self.viewer_channel_checks.items():
+            viewer.set_channel_visible(label, check.isChecked())
+        index = self.viewer_tabs.addTab(viewer, title)
+        self.viewer_tabs.setCurrentIndex(index)
+        self._update_viewer_stack()
+        return viewer
+
+    def _current_viewer(self) -> "PlotlyViewer | None":
+        widget = self.viewer_tabs.currentWidget()
+        return widget if isinstance(widget, PlotlyViewer) else None
+
+    def _update_viewer_stack(self) -> None:
+        has_tabs = self.viewer_tabs.count() > 0
+        self._viewer_stack.setCurrentIndex(1 if has_tabs else 0)
+        self.save_plot_button.setEnabled(has_tabs)
+        self.close_tab_button.setEnabled(has_tabs)
+        for check in self.viewer_channel_checks.values():
+            check.setEnabled(has_tabs)
+
+    def _close_viewer_tab(self, index: int) -> None:
+        widget = self.viewer_tabs.widget(index)
+        self.viewer_tabs.removeTab(index)
+        if widget is not None:
+            if widget is self._active_scan_viewer:
+                self._active_scan_viewer = None
+            widget.deleteLater()
+        self._update_viewer_stack()
+
+    def _close_current_viewer_tab(self) -> None:
+        index = self.viewer_tabs.currentIndex()
+        if index >= 0:
+            self._close_viewer_tab(index)
+
+    def _on_viewer_channel_toggled(self, label: str, on: bool) -> None:
+        viewer = self._current_viewer()
+        if viewer is not None:
+            viewer.set_channel_visible(label, on)
+
+    def _on_viewer_tab_changed(self, index: int) -> None:
+        # Reflect the newly-selected tab's channel visibility in the shared checkboxes.
+        viewer = self._current_viewer()
+        if viewer is None:
+            return
+        for label, check in self.viewer_channel_checks.items():
+            visible = label in viewer._visible
+            if check.isChecked() != visible:
+                check.blockSignals(True)
+                check.setChecked(visible)
+                check.blockSignals(False)
 
     def _load_viewer_csv(self) -> None:
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
@@ -714,7 +783,41 @@ class MainWindow(QtWidgets.QMainWindow):
             "CSV files (*.csv);;All files (*)",
         )
         if paths:
-            self.viewer.load_files(paths)
+            viewer = self._new_viewer_tab(Path(paths[0]).stem)
+            viewer.load_files(paths)
+
+    def _save_current_plot(self) -> None:
+        viewer = self._current_viewer()
+        if viewer is None or not viewer.has_plot():
+            QtWidgets.QMessageBox.information(self, "Save plot", "There is no plot to save yet.")
+            return
+        path, selected = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save plot", str(self.base_dir / "measurements"),
+            "PNG image (*.png);;Interactive HTML (*.html)",
+        )
+        if not path:
+            return
+        want_html = path.lower().endswith(".html") or "html" in (selected or "").lower()
+        if want_html:
+            if not path.lower().endswith(".html"):
+                path += ".html"
+            try:
+                viewer.save_html(path)
+            except Exception as exc:  # pragma: no cover - disk/permission error
+                QtWidgets.QMessageBox.warning(self, "Save failed", str(exc))
+                return
+            self.statusBar().showMessage(f"Saved plot: {path}", 6000)
+            return
+        if not path.lower().endswith(".png"):
+            path += ".png"
+
+        def done(ok: bool, message: str) -> None:
+            if ok:
+                self.statusBar().showMessage(f"Saved plot: {message}", 6000)
+            else:
+                QtWidgets.QMessageBox.warning(self, "Save PNG failed", message)
+
+        viewer.save_png(path, done)
 
     def _build_log_group(self) -> QtWidgets.QGroupBox:
         group = QtWidgets.QGroupBox("Run Log")
@@ -1106,8 +1209,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.channels_status_label.setText(message)
 
     def _on_scan_prepared(self, params: object, csv_path: str) -> None:
-        self.follow_check.setChecked(True)  # show the plot live in the Viewer automatically
-        self.viewer.set_active_csv(csv_path)
+        # Give this scan its own Viewer tab and follow it live automatically.
+        title = f"{params.label} · {QtCore.QTime.currentTime().toString('HH:mm:ss')}"
+        viewer = self._new_viewer_tab(title)
+        viewer.set_follow(True)
+        viewer.set_active_csv(csv_path)
+        self._active_scan_viewer = viewer
         self.output_path_label.setText(f"CSV output: {csv_path}")
         self.scan_running = True
         self.poll_timer.stop()
@@ -1127,7 +1234,8 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> None:
         self.scan_running = False
         self._set_scan_state(False)
-        self.viewer.notify_scan_finished()
+        if self._active_scan_viewer is not None:
+            self._active_scan_viewer.notify_scan_finished()
         if self.connected_backend:
             self.poll_timer.start()
         self._on_channel_refresh(final_snapshots)

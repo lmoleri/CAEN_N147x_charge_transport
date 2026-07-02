@@ -55,12 +55,36 @@ A single window with four tabs:
   scan finishes (or is aborted), the scanned channels **ramp back down to 1 V and stay ON** (they are
   never switched off automatically).
 - **Viewer** — a Plotly current viewer (in `μA`) whose **x-axis follows the swept variable** (THGEM
-  voltage, drift field, or induction field). **Load CSV…** plots a saved run; load several of the
-  *same* program to **overlay** them (auto-legended by their held quantities), toggle channels
-  (C/T1/B1/T2), and **Clear**. **Follow active scan** turns on automatically when a scan starts, so the
-  Viewer builds the plot **live** as points are taken (untick to stop, or watch a past run instead).
-  Plotting is decoupled from acquisition (the scan just writes CSV), mirroring
+  voltage, drift field, or induction field). **Every scan opens its own tab** and follows it **live**
+  as points are taken; tabs stay open so you can compare runs. Each point carries an **error bar** —
+  the standard deviation of the repeated current readings taken at that point (the measurement noise).
+  **Load CSV…** opens a new tab for a saved run (select several files of the *same* program to
+  **overlay** them, auto-legended by their held quantities). The channel toggles (C/T1/B1/T2) and
+  **Save plot…** act on the current tab, and **Close tab** removes it. **Save plot…** exports the
+  current plot as a **PNG image** or a self-contained **interactive HTML** file. Plotting is decoupled
+  from acquisition (the scan just writes CSV), mirroring
   [CAEN-Plotly-Viewer-From-Log](https://github.com/weizmann-atlas/CAEN-Plotly-Viewer-From-Log).
+
+## System requirements
+
+- **OS:** Windows 10 or 11 (64-bit) for the packaged `.exe`. Running from source also works on
+  macOS/Linux (the Simulation backend needs no hardware).
+- **Display:** a real desktop session. The Viewer embeds a Chromium-based web view (QtWebEngine) that
+  renders in **software** by default (the app sets `--disable-gpu`), so **no dedicated GPU is needed** —
+  but it will not render on a headless/offscreen machine.
+- **First launch:** antivirus/firewall may prompt once — the Viewer loads its plot from a `127.0.0.1`
+  loopback server (the connection never leaves the machine); allow it. Unzip the bundle to a writable
+  folder (Desktop/Documents, not `Program Files`).
+- **Building from source:** Python 3.10+ (see [Run from source](#run-from-source) and
+  [Build the Windows bundle yourself](#build-the-windows-bundle-yourself)).
+- **Real hardware:** the CAEN HV Wrapper library on the Windows lab PC (see
+  [Using real CAEN hardware](#using-real-caen-hardware)); Simulation needs nothing extra.
+- No image-export dependency is required — **Save plot…** renders the PNG with the web view's own
+  Plotly (client-side), so nothing like `kaleido` is bundled.
+
+> Maintenance note: PyQtWebEngine 5.15 ships an old Chromium (~87). Any JavaScript inlined into the
+> plot (plotly.js) must avoid or **polyfill** newer JS features (e.g. `Array.prototype.at`, Chromium 92),
+> or the embedded plot silently renders blank. The Viewer injects such a polyfill before plotly.js.
 
 ## Run from source
 

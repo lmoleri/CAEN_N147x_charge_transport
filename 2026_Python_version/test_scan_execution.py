@@ -186,6 +186,20 @@ class ScanExecutionTests(unittest.TestCase):
             self.assertEqual(backend._channel_state[label]["voltage_v"], 1.0)
             self.assertTrue(backend._channel_state[label]["is_on"])
 
+    def test_records_carry_measured_imon_error_bars(self) -> None:
+        # Each point is read several times; the record stores mean IMon plus the
+        # std across the reads as the error bar (non-zero for ON, noisy channels).
+        params = ScanParameters(
+            label="THGEM", scan_variable=ScanVariable.THGEM_VOLTAGE,
+            start=400, stop=500, step=50, wait_seconds=0.0,
+        )
+        _, records = self._run(params)
+        for record in records:
+            for attr in ("c_imon_err_ua", "t1_imon_err_ua", "b1_imon_err_ua", "t2_imon_err_ua"):
+                self.assertGreaterEqual(getattr(record, attr), 0.0)
+        self.assertTrue(any(r.c_imon_err_ua > 0 for r in records))
+        self.assertTrue(any(r.b1_imon_err_ua > 0 for r in records))
+
 
 if __name__ == "__main__":
     unittest.main()
